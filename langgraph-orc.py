@@ -34,6 +34,7 @@ class ResearchState(TypedDict):
     modelling_counter: int
     decision_log: list[dict]
 
+#update this agent so that we dont need to hard query, make more dynamic
 def data_agent(state: ResearchState) -> dict:
     conn = sqlite3.connect("diabetes.db")
 
@@ -57,6 +58,7 @@ def data_agent(state: ResearchState) -> dict:
     #we return the stuff we want to update in our state
     return {"given_data": text_data, "decision_log": updated_log}
 
+#when we use more collumns for db we need to update prompt
 def methods_agent(state: ResearchState) -> dict:
     data = state["given_data"]
 
@@ -92,6 +94,7 @@ METHOD: <name of the test>
 
     return {"method_choice": response_text, "decision_log": updated_log}
 
+#this wont be in final code, this should be in docker sandbox
 def run_sandbox(code: str) -> dict: #utility function
     buffer = io.StringIO() #empty fake in-memory
     try:
