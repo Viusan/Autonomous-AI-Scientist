@@ -3,6 +3,7 @@ import sqlite3
 import io
 import contextlib
 import json
+import pandas as pd
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -23,7 +24,7 @@ client = OpenAI(
 
 #this is stategraph, it's a data container (or shared memory) that gets passed around the agents.
 class ResearchState(TypedDict):
-    given_data: str
+    given_data: pd.DataFrame
     method_choice: str
     generated_code: str
     calculated_data: dict
@@ -34,29 +35,58 @@ class ResearchState(TypedDict):
     modelling_counter: int
     decision_log: list[dict]
 
-#update this agent so that we dont need to hard query, make more dynamic
 def data_agent(state: ResearchState) -> dict:
     conn = sqlite3.connect("diabetes.db")
+    cursor = conn.cursor()
 
-    query = """
-    SELECT PhysActivity, Diabetes_binary, COUNT(*) as antall
-    FROM diabetes_binary
-    GROUP BY PhysActivity, Diabetes_binary
+    TABLE_NAME = "diabetes_binary"
+    cursor.execute(f"PRAGMA table_info({TABLE_NAME})")#gets table info from diabtes_binary
+    columns = [row[1] for row in cursor.fetchall()]
+    features_in_database = [c for c in columns if c != "Diabetes_binary"]#saw that diabetes_binary was included, which is not a feature, so we avoid that
+    
+    prompt = f"""
+    You have a list of features avilable which include information about a person and their lifestyle.
+    You are going to pick out which of these features are relevant for predicting diabetes.
+    Here is the list of features: {features_in_database}
+    Respond with ONLY a single JSON object and nothing else, no markdown code fences, no text before or after it.
+    Example of the exact shape required (do not copy the content it only serves as an example, copy only the structure), and also COPY the exact names of what is found in the list of features, including capitalzation:
+    {{"features": ["BMI", "HighBP", "PhysActivity"]}}
     """
-    results = conn.execute(query).fetchall()
+
+    response = client.chat.completions.create(
+    model=model_name,
+    messages=[{"role": "user", "content": prompt}],
+    max_tokens=1500,
+    )
+
+    response_text = response.choices[0].message.content
+    try:
+        featuresJSON = json.loads(response_text)
+        chosen_features = featuresJSON["features"]
+    except:
+        chosen_features = []
+
+    #build the sql string
+    validated_features = [c for c in chosen_features if c in features_in_database]
+    if validated_features:
+        columns_str = ", ".join(validated_features)
+    else:
+        #if our earlier fails then we still get a valid sql string from this
+        columns_str = ", ".join(features_in_database)
+
+    query = f"SELECT {columns_str}, Diabetes_binary FROM {TABLE_NAME}"
+
+    #dataframe is a returned as a python object we can work with
+    #good thing here is column name is attached to data
+    data_frame = pd.read_sql(query, conn)
+
     conn.close()
 
-    #create a text summary of the numbers
-    text_data = "PhysActivity, Diabetes_binary, Antall\n"
-    for row in results:
-        text_data += f"{row[0]}, {row[1]}, {row[2]}\n"
-
-    #we create a log so we know what has happened, and append it to decision log in our typeddict
-    new_log_entry = {"agent": "data_agent", "action": f"generated data from diabetes.db, the data that was generated: {text_data}"}
-    updated_log = state["decision_log"] + [new_log_entry] #we add list + list, or error. Also in LangGraph creating a new list instead of mutating old is better.
-
+    new_log_entry = {"agent": "data_agent", "action": f"agent gets the data it wants from diabetes.db, it chose to get {columns_str}"}
+    updated_log = state["decision_log"] + [new_log_entry] 
+    
     #we return the stuff we want to update in our state
-    return {"given_data": text_data, "decision_log": updated_log}
+    return {"given_data": data_frame, "decision_log": updated_log}
 
 #when we use more collumns for db we need to update prompt
 def methods_agent(state: ResearchState) -> dict:
