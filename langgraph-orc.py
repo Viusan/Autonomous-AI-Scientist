@@ -1,3 +1,4 @@
+#dette er test
 import os
 import sqlite3
 import io
