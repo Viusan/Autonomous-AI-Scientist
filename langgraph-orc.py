@@ -25,8 +25,7 @@ client = OpenAI(
 #this is stategraph, it's a data container (or shared memory) that gets passed around the agents.
 class ResearchState(TypedDict):
     given_data: pd.DataFrame
-    method_choice: str
-    generated_code: str
+    method_choice: dict
     calculated_data: dict
     interpretation: str
     reviewer_feedback: str
@@ -88,111 +87,145 @@ def data_agent(state: ResearchState) -> dict:
     #we return the stuff we want to update in our state
     return {"given_data": data_frame, "decision_log": updated_log}
 
+def describe_columns(data) -> str:#we reuse this two times, so better to just create a function
+    column_list = []
+    for col in data.columns:
+        if col == "Diabetes_binary":
+            continue
+        line = f"- {col}: {data[col].dtype}, {data[col].nunique()} unique values"
+        column_list.append(line)
+    return "\n".join(column_list)
+
 #when we use more collumns for db we need to update prompt
 def methods_agent(state: ResearchState) -> dict:
     data = state["given_data"]
+    
+    column_description = describe_columns(data)#so for every item in our list we seperate is with a new line, so it will look like a list now
 
-    prompt = f"""You are a biostatistics assistant helping choose an appropriate statistical test.
+    prompt = f"""You are a biostatistics assistant helping choose appropriate statistical tests.
 
-Here is aggregated survey data showing the number of respondents (Antall) for each
-combination of two binary variables:
+Here are the candidate features and their data types:
+{column_description}
 
-- PhysActivity: whether the respondent reported physical activity in the past 30 days
-  (0 = no, 1 = yes)
-- Diabetes_binary: whether the respondent has diabetes or prediabetes
-  (0 = no, 1 = yes)
+The outcome you are testing against is Diabetes_binary (0 = no diabetes/prediabetes, 1 = yes), a binary variable.
 
-here is the data that you are given {data}
+For EACH feature listed above, decide which statistical method is most appropriate to test
+whether there is a significant association between that feature and Diabetes_binary. Different
+features may need different tests depending on their type (e.g. a binary feature needs a
+different test than a continuous one like BMI) — reason about each feature individually rather
+than picking one test for all of them.
 
-Based on this data, decide which statistical method is most appropriate to test whether
-there is a significant association between PhysActivity and Diabetes_binary. Briefly
-explain your reasoning (e.g. variable types, sample size, what the test assumes), then
-end your answer with exactly one line in this format:
+Briefly explain your reasoning for each feature (variable types, sample size, what the test
+assumes), then end your answer with one line per feature in exactly this format, with no
+other text in those lines:
 
-METHOD: <name of the test>
+METHOD: <feature name> = <name of the test>
+
+For example (do not copy the content, only the structure):
+METHOD: BMI = Mann-Whitney U test
+METHOD: HighBP = Chi-square test
 """
     response = client.chat.completions.create(
     model=model_name,
     messages=[{"role": "user", "content": prompt}],
-    max_tokens=1500,
+    max_tokens=9000,
     )
 
     response_text = response.choices[0].message.content
 
+    method_choice = {}
+    if response_text: #incase we get a empty string
+        for line in response_text.split("\n"):
+                if line.startswith("METHOD:"): #if the line starts with method we want it
+                    rest = line[len("METHOD:"):]# everything after "METHOD:"
+                    parts = rest.split("=")# splits into [" BMI ", " Mann-Whitney U test"]
+                    feature = parts[0].strip()# removes leading/trailing spaces → "BMI"
+                    method = parts[1].strip()# removes leading/trailing spaces → "Mann-Whitney U test"
+                    method_choice[feature] = method
+
     new_log_entry = {"agent": "methods_agent", "action": f"agent decided what method is best to use for calculating the statistics, and the decision it made: {response_text}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
-    return {"method_choice": response_text, "decision_log": updated_log}
+    return {"method_choice": method_choice, "decision_log": updated_log}
 
 #this wont be in final code, this should be in docker sandbox
-def run_sandbox(code: str) -> dict: #utility function
+def run_sandbox(code: str, given_data) -> dict: #utility function
     buffer = io.StringIO() #empty fake in-memory
     try:
         with contextlib.redirect_stdout(buffer): #whatever is printed inside here goes into the memory
-            exec(code)
+            exec(code, {"given_data": given_data})
             captured_text = buffer.getvalue()   #pulls everything from buffer to string
             return {"success": True, "stdout": captured_text, "error": None}
     except Exception as e:
         return {"success": False, "stdout": buffer.getvalue(), "error": str(e)}
 
 def modelling_agent(state: ResearchState) -> dict:
-    use_method = state["method_choice"]
+    method_choice = state["method_choice"]
     given_data = state["given_data"]
-    if "error" in state["calculated_data"]:
-        error_note = f"\nYour previous attempt failed with this error: {state['calculated_data']['error']}\nFix the code so this doesn't happen again.\nThe generated code that previously did not work was: {state['generated_code']}\nUsing this information generate new code that works."
-    else:
-        error_note = ""
 
-    prompt = f"""
-    You are a Python data analyst. Write Python code that performs the following statistical
-test on the data given below. Do not explain anything — output ONLY valid Python code,
-with no markdown formatting, no triple backticks, and no comments outside the code.
+    results = {}
 
-Method to use: {use_method}
+    for feature, method in method_choice.items():
+        prompt = f"""
+You are a Python data analyst. Write Python code that performs the following statistical
+test. Do not explain anything — output ONLY valid Python code, with no markdown
+formatting, no triple backticks, and no comments outside the code.
 
-The given data is: {given_data}
+Feature to test: {feature}
+Method to use: {method}
+
+A variable named `given_data` already exists in your execution environment as a pandas
+DataFrame. It contains the column `{feature}` and the outcome column `Diabetes_binary`
+(0 = no diabetes/prediabetes, 1 = yes), along with others you should ignore. Use
+`given_data` directly by that exact name — do not redefine it, rebuild it, or load it
+from anywhere else.
 
 Requirements:
-- Use only these libraries: scipy.stats, numpy. Do not import anything else, and do not
-  attempt any file access, network access, or database connection — work only with the
-  numbers given above.
-- Build the data directly from the literal values shown (e.g. as a list or array), not by
-  reading any external source.
+- Use only these libraries: scipy.stats, numpy, pandas. Do not import anything else, and do
+  not attempt any file access, network access, or database connection — work only with the
+  `given_data` variable already provided to you.
+- Only use the `{feature}` and `Diabetes_binary` columns from `given_data` for this test.
 - Run the test named above and print the result in exactly this format, with no other
   output:
   RESULT: statistic=<value>, p_value=<value>
-- The code must run standalone from top to bottom with no undefined variables.
-{error_note}
+- The code must run standalone from top to bottom with no undefined variables, other than
+  `given_data` itself.
 """
 
-    response = client.chat.completions.create(
-    model=model_name,
-    messages=[{"role": "user", "content": prompt}],
-    max_tokens=1500,
-    )
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1500,
+        )
 
-    response_text = response.choices[0].message.content
-    sandbox_result = run_sandbox(response_text)
+        response_text = response.choices[0].message.content
+        sandbox_result = run_sandbox(response_text, given_data)
 
-    if sandbox_result["success"]:
-        text = sandbox_result["stdout"]
-        parts = text.split(",")
-        chi2_value = parts[0].split("=")
-        p_value = parts[1].split("=")
+        if sandbox_result["success"]:
+            text = sandbox_result["stdout"]
+            try:
+                parts = text.split(",")
+                statistic_value = parts[0].split("=")
+                p_value = parts[1].split("=")
+                calculated = {"statistic": float(statistic_value[1]), "p_value": float(p_value[1])}
+            except Exception as e:
+                calculated = {"error": f"Could not parse output '{text}': {e}"}
+        else:
+            calculated = {"error": sandbox_result["error"]}
 
-        calculated = {"chi2": float(chi2_value[1]), "p_value": float(p_value[1])}
-    else:
-        calculated = {"error": sandbox_result["error"]}
+        results[feature] = calculated
 
-    new_log_entry =  {"agent": "modelling_agent", "action": f"Created python code to run, it came up with: {response_text}. Outcome of the python code: {calculated}"}
+    new_log_entry = {"agent": "modelling_agent", "action": f"Ran one statistical test per feature. Results: {results}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
-    return {"calculated_data": calculated, "decision_log": updated_log, "modelling_counter": state["modelling_counter"]+1, "generated_code": response_text}
+    return {"calculated_data": results, "decision_log": updated_log, "modelling_counter": state["modelling_counter"] + 1}
 
 def route_after_modelling(state: ResearchState) -> str:
     calculated_data = state["calculated_data"]
 
-    if "error" not in calculated_data:
+    has_error = any("error" in result for result in calculated_data.values())
+
+    if not has_error:
         return "approved"
     elif state["modelling_counter"] < 3:
         return "needs_revision"
@@ -200,24 +233,39 @@ def route_after_modelling(state: ResearchState) -> str:
         return "failed"
 
 def interpretation_agent(state: ResearchState) -> dict:
-    calculated= state["calculated_data"]   #read what modelling_agent produced, and what is in state
+    calculated= state["calculated_data"]#read what modelling_agent produced
+    result_list = []
+
+    for feature, result in calculated.items():
+        if "error" in result:
+            line = f"- {feature}: test failed with error: {result['error']}"
+        else:
+            line = f"- {feature}: statistic={result['statistic']}, p_value={result['p_value']}"
+        result_list.append(line)
     
-    if "VERDICT: REVISE" in state["reviewer_feedback"]:
-        error_note = f"\nYour previous interpretation was not approved by verdict agent, and reason was {state['reviewer_feedback']}\nInterpret the info again."
+    results_description = "\n".join(result_list)
+
+    if state["reviewer_feedback"] and not state["reviewer_verdict"]:
+        error_note = f"\nYour previous interpretation was not approved by the reviewer, and the reason was: {state['reviewer_feedback']}\nInterpret the info again."
     else:
         error_note = ""
 
-    prompt = f"""Here is a statistical result from a health survey. The following method was used to test whether physical activity (PhysActivity) is related to diabetes (Diabetes_binary) in this data:
+    prompt = f"""Here are statistical results from a health survey. Each of the following features
+was tested individually against diabetes (Diabetes_binary), using the method shown for it:
 
+{results_description}
+
+Methods used (feature = test):
 {state['method_choice']}
 
-Result:
-Statistic: {calculated['chi2']}
-P-value: {calculated['p_value']}
-
-Based on this result, what can we say about the relationship between physical activity and diabetes? Keep in mind this dataset has a very large sample size, so even a small, practically unimportant difference can produce a statistically significant p-value — be careful not to overstate the finding. Answer briefly, in a maximum of 3 sentences.
+Based on these results, what can we say about the relationship between these features and
+diabetes? Keep in mind this dataset has a very large sample size, so even a small, practically
+unimportant difference can produce a statistically significant p-value — be careful not to
+overstate any finding. Answer briefly, covering the features together, in a maximum of 5
+sentences.
 {error_note}
 """
+
     response = client.chat.completions.create(
     model=model_name,
     messages=[{"role": "user", "content": prompt}],
@@ -278,7 +326,7 @@ Example of the exact shape required (do not copy the content it only serves as a
     else:
         failed_log =""
 
-    new_log_entry = {"agent": "reviewer_agent", "action": f"Deciding if the interpretation was valid or not, this time the verdict was {reviewer_verdict} and reasoning was: {json_reformat["reason"]}. {failed_log}"}
+    new_log_entry = {"agent": "reviewer_agent", "action": f"Deciding if the interpretation was valid or not, this time the verdict was {reviewer_verdict} and reasoning was: {json_reformat['reason']}. {failed_log}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
     return {"reviewer_feedback": response_text, "reviewer_verdict": reviewer_verdict, "revision_counter": state["revision_counter"]+1, "decision_log": updated_log}
@@ -336,7 +384,6 @@ graph.get_graph().draw_mermaid_png(output_file_path="graph.png") #create a graph
 result = graph.invoke({
     "given_data": "",
     "method_choice": "",
-    "generated_code": "",
     "calculated_data": {},
     "interpretation": "",
     "reviewer_feedback": "",
