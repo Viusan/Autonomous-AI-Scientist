@@ -39,8 +39,8 @@ def data_agent(state: ResearchState) -> dict:
     cursor = conn.cursor()
 
     TABLE_NAME = "diabetes_binary"
-    cursor.execute(f"PRAGMA table_info({TABLE_NAME})")#gets table info from diabtes_binary
-    columns = [row[1] for row in cursor.fetchall()]
+    cursor.execute(f"PRAGMA table_info({TABLE_NAME})")#gets table info from diabtes_binary (pragma kinda diff check out online to see visualization)
+    columns = [row[1] for row in cursor.fetchall()]#row 1 from pragma displays column names 
     features_in_database = [c for c in columns if c != "Diabetes_binary"]#saw that diabetes_binary was included, which is not a feature, so we avoid that
     
     prompt = f"""
@@ -59,6 +59,8 @@ def data_agent(state: ResearchState) -> dict:
     )
 
     response_text = response.choices[0].message.content
+
+    #try catch incase we get broken JSON
     try:
         featuresJSON = json.loads(response_text)
         chosen_features = featuresJSON["features"]
@@ -66,7 +68,7 @@ def data_agent(state: ResearchState) -> dict:
         chosen_features = []
 
     #build the sql string
-    validated_features = [c for c in chosen_features if c in features_in_database]
+    validated_features = [c for c in chosen_features if c in features_in_database]#we do this incase the LLM returns slighty diff names for columns, then SQL query will be broken
     if validated_features:
         columns_str = ", ".join(validated_features)
     else:
@@ -76,7 +78,7 @@ def data_agent(state: ResearchState) -> dict:
     query = f"SELECT {columns_str}, Diabetes_binary FROM {TABLE_NAME}"
 
     #dataframe is a returned as a python object we can work with
-    #good thing here is column name is attached to data
+    #good thing here is column name is attached to data (ask claude to visualize if you dont understand)
     data_frame = pd.read_sql(query, conn)
 
     conn.close()
@@ -88,6 +90,7 @@ def data_agent(state: ResearchState) -> dict:
     return {"given_data": data_frame, "decision_log": updated_log}
 
 def describe_columns(data) -> str:#we reuse this two times, so better to just create a function
+    #so for every item in our list we seperate is with a new line, so it will look like a list now describing the diff columns and data type
     column_list = []
     for col in data.columns:
         if col == "Diabetes_binary":
@@ -96,11 +99,9 @@ def describe_columns(data) -> str:#we reuse this two times, so better to just cr
         column_list.append(line)
     return "\n".join(column_list)
 
-#when we use more collumns for db we need to update prompt
 def methods_agent(state: ResearchState) -> dict:
     data = state["given_data"]
-    
-    column_description = describe_columns(data)#so for every item in our list we seperate is with a new line, so it will look like a list now
+    column_description = describe_columns(data)
 
     prompt = f"""You are a biostatistics assistant helping choose appropriate statistical tests.
 
@@ -132,9 +133,9 @@ METHOD: HighBP = Chi-square test
     )
 
     response_text = response.choices[0].message.content
-
     method_choice = {}
-    if response_text: #incase we get a empty string
+
+    if response_text: #incase we get a empty string or nothing inside
         for line in response_text.split("\n"):
                 if line.startswith("METHOD:"): #if the line starts with method we want it
                     rest = line[len("METHOD:"):]# everything after "METHOD:"
@@ -162,10 +163,9 @@ def run_sandbox(code: str, given_data) -> dict: #utility function
 def modelling_agent(state: ResearchState) -> dict:
     method_choice = state["method_choice"]
     given_data = state["given_data"]
-
     results = {}
 
-    for feature, method in method_choice.items():
+    for feature, method in method_choice.items():#we put this in a loop cause we running statistics for each method the LLM chose
         prompt = f"""
 You are a Python data analyst. Write Python code that performs the following statistical
 test. Do not explain anything — output ONLY valid Python code, with no markdown
@@ -213,7 +213,7 @@ Requirements:
         else:
             calculated = {"error": sandbox_result["error"]}
 
-        results[feature] = calculated
+        results[feature] = calculated #return in the dict 
 
     new_log_entry = {"agent": "modelling_agent", "action": f"Ran one statistical test per feature. Results: {results}"}
     updated_log = state["decision_log"] + [new_log_entry]
@@ -222,9 +222,11 @@ Requirements:
 
 def route_after_modelling(state: ResearchState) -> str:
     calculated_data = state["calculated_data"]
-
     has_error = any("error" in result for result in calculated_data.values())
 
+    #if one of the methods returned as a error we just run the modelling agent again
+    #idk maybe we can make this more effective by only re-running the method that got the error
+    #cause now we re-running the whole method list, maybe waste of tokens?
     if not has_error:
         return "approved"
     elif state["modelling_counter"] < 3:
@@ -236,16 +238,16 @@ def interpretation_agent(state: ResearchState) -> dict:
     calculated= state["calculated_data"]#read what modelling_agent produced
     result_list = []
 
-    for feature, result in calculated.items():
+    for feature, result in calculated.items():#just checking through which methods failed and which didnt
         if "error" in result:
             line = f"- {feature}: test failed with error: {result['error']}"
         else:
             line = f"- {feature}: statistic={result['statistic']}, p_value={result['p_value']}"
         result_list.append(line)
     
-    results_description = "\n".join(result_list)
+    results_description = "\n".join(result_list)#we turn the result list from a list to a string
 
-    if state["reviewer_feedback"] and not state["reviewer_verdict"]:
+    if state["reviewer_feedback"] and not state["reviewer_verdict"]:#if feedback was not empty and verdit is false 
         error_note = f"\nYour previous interpretation was not approved by the reviewer, and the reason was: {state['reviewer_feedback']}\nInterpret the info again."
     else:
         error_note = ""
