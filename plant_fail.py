@@ -14,7 +14,7 @@ def plant_label_stoy(df, andel=0.1): # ca 10 prosent av dataene skal odelegges, 
     df_kopi.loc[valgte_indekser, "Diabetes_binary"] = 1 - df_kopi.loc[valgte_indekser, "Diabetes_binary"]
 
 
-    # Lag fasiten som sier hva som ble endret
+    
     fasit = {
         "type": "label_stoy",
         "andel": andel,
@@ -25,7 +25,7 @@ def plant_label_stoy(df, andel=0.1): # ca 10 prosent av dataene skal odelegges, 
     return df_kopi, fasit
 
 
-def plant_urealistisk_bmi(df, andel=0.05, kolonne="BMI"): # ca 5 prosent av radene får BMI satt til 0 eller 999, verdier som er umulige i virkeligheten
+def plant_urealistisk_bmi(df, andel=0.05, kolonne="BMI"): # ca 5 prosent av radene får BMI satt til 0 eller 999.
     df_kopi = df.copy()
 
     # Velger randomme rader å ødelegge
@@ -36,7 +36,7 @@ def plant_urealistisk_bmi(df, andel=0.05, kolonne="BMI"): # ca 5 prosent av rade
     rng = np.random.RandomState(42)
     df_kopi.loc[valgte_indekser, kolonne] = rng.choice([0, 999], size=antall_rader)
 
-    # Lag fasiten som sier hva som ble endret
+    
     fasit = {
         "type": "urealistisk_bmi",
         "kolonne": kolonne,
@@ -48,7 +48,7 @@ def plant_urealistisk_bmi(df, andel=0.05, kolonne="BMI"): # ca 5 prosent av rade
     return df_kopi, fasit
 
 
-def plant_manglende_verdier(df, andel=0.15, kolonne="Income"): # ca 15 prosent av radene i en kolonne blir tomme (NaN, blir NULL i databasen)
+def plant_manglende_verdier(df, andel=0.15, kolonne="Income"): # ca 15 prosent av radene i en kolonne blir NaN eller null i databasen. 
     df_kopi = df.copy()
     df_kopi[kolonne] = df_kopi[kolonne].astype(float)  # må være float for at NaN skal fungere
 
@@ -59,7 +59,7 @@ def plant_manglende_verdier(df, andel=0.15, kolonne="Income"): # ca 15 prosent a
     # Fjerner verdien i de valgte radene
     df_kopi.loc[valgte_indekser, kolonne] = np.nan
 
-    # Lag fasiten som sier hva som ble endret
+    
     fasit = {
         "type": "manglende_verdier",
         "kolonne": kolonne,
@@ -77,7 +77,7 @@ def plant_kolonneombytting(df, kol_a="BMI", kol_b="PhysHlth"): # bytter innholde
     # Bytter plass på de to kolonnene
     df_kopi[[kol_a, kol_b]] = df_kopi[[kol_b, kol_a]].values
 
-    # Lag fasiten som sier hva som ble endret
+    
     fasit = {
         "type": "kolonneombytting",
         "kolonner": [kol_a, kol_b],
@@ -89,7 +89,6 @@ def plant_kolonneombytting(df, kol_a="BMI", kol_b="PhysHlth"): # bytter innholde
 
 
 # Hver feiltype får sin egen tabell og fasit-fil.
-# Label-støy beholder det gamle navnet, så tren_modeller.py og llm_vurder.py fortsatt virker.
 feil = {
     "diabetes_binary_corrupt": ("label_stoy", plant_label_stoy),
     "diabetes_binary_bmi": ("urealistisk_bmi", plant_urealistisk_bmi),
