@@ -62,7 +62,7 @@ def run_query(chosen_columns: list[str]) -> str: #taking in column name instead 
         #if our earlier fails then we still get a valid sql string from this
         columns_str = ", ".join(names_in_column)
     
-    query = f"SELECT {columns_str}, Diabetes_binary FROM {TABLE_NAME}"
+    query = f"SELECT {columns_str}, Diabetes_binary FROM {TABLE_NAME} LIMIT 20"
 
     #dataframe is a returned as a python object we can work with
     #good thing here is column name is attached to data (ask claude to visualize if you dont understand)
@@ -71,6 +71,11 @@ def run_query(chosen_columns: list[str]) -> str: #taking in column name instead 
 
     conn.close()
     return json.dumps(df_dictionary)
+
+@mcp.tool()
+def finalized_selection(chosen_columns: list[str]) -> str:  #this is just to tell in message that we are done and what we picked, we can use this to later build the pandas query to get the whole database so we dont fill up llm context window
+    """call this once you are done deciding which columns are relevant and ready to finish"""
+    return "Selection recorded: " + ", ".join(chosen_columns)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
