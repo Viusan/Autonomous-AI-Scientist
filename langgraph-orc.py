@@ -137,11 +137,12 @@ METHOD: HighBP = Chi-square test
 
     if response_text: #incase we get a empty string or nothing inside
         for line in response_text.split("\n"):
-                if line.startswith("METHOD:"): #if the line starts with method we want it
-                    rest = line[len("METHOD:"):]# everything after "METHOD:"
-                    parts = rest.split("=")# splits into [" BMI ", " Mann-Whitney U test"]
-                    feature = parts[0].strip()# removes leading/trailing spaces → "BMI"
-                    method = parts[1].strip()# removes leading/trailing spaces → "Mann-Whitney U test"
+            if "METHOD:" in line: #we check if "METHOD" is even in our currentresponse line
+                rest = line.split("METHOD:", 1)[1]
+                parts = rest.split("=")
+                if len(parts) == 2: #check if we produced two pieces, and remove usless * if it was included
+                    feature = parts[0].strip(" *")
+                    method = parts[1].strip(" *")
                     method_choice[feature] = method
 
     new_log_entry = {"agent": "methods_agent", "action": f"agent decided what method is best to use for calculating the statistics, and the decision it made: {response_text}"}
@@ -165,55 +166,58 @@ def modelling_agent(state: ResearchState) -> dict:
     given_data = state["given_data"]
     results = {}
 
-    for feature, method in method_choice.items():#we put this in a loop cause we running statistics for each method the LLM chose
-        prompt = f"""
-You are a Python data analyst. Write Python code that performs the following statistical
-test. Do not explain anything — output ONLY valid Python code, with no markdown
-formatting, no triple backticks, and no comments outside the code.
+    if not method_choice:
+            results["_pipeline_error"] = {"error": "methods_agent produced no usable METHOD lines; method_choice was empty."}
+    else:
+        for feature, method in method_choice.items():#we put this in a loop cause we running statistics for each method the LLM chose
+            prompt = f"""
+    You are a Python data analyst. Write Python code that performs the following statistical
+    test. Do not explain anything — output ONLY valid Python code, with no markdown
+    formatting, no triple backticks, and no comments outside the code.
 
-Feature to test: {feature}
-Method to use: {method}
+    Feature to test: {feature}
+    Method to use: {method}
 
-A variable named `given_data` already exists in your execution environment as a pandas
-DataFrame. It contains the column `{feature}` and the outcome column `Diabetes_binary`
-(0 = no diabetes/prediabetes, 1 = yes), along with others you should ignore. Use
-`given_data` directly by that exact name — do not redefine it, rebuild it, or load it
-from anywhere else.
+    A variable named `given_data` already exists in your execution environment as a pandas
+    DataFrame. It contains the column `{feature}` and the outcome column `Diabetes_binary`
+    (0 = no diabetes/prediabetes, 1 = yes), along with others you should ignore. Use
+    `given_data` directly by that exact name — do not redefine it, rebuild it, or load it
+    from anywhere else.
 
-Requirements:
-- Use only these libraries: scipy.stats, numpy, pandas. Do not import anything else, and do
-  not attempt any file access, network access, or database connection — work only with the
-  `given_data` variable already provided to you.
-- Only use the `{feature}` and `Diabetes_binary` columns from `given_data` for this test.
-- Run the test named above and print the result in exactly this format, with no other
-  output:
-  RESULT: statistic=<value>, p_value=<value>
-- The code must run standalone from top to bottom with no undefined variables, other than
-  `given_data` itself.
-"""
+    Requirements:
+    - Use only these libraries: scipy.stats, numpy, pandas. Do not import anything else, and do
+      not attempt any file access, network access, or database connection — work only with the
+      `given_data` variable already provided to you.
+    - Only use the `{feature}` and `Diabetes_binary` columns from `given_data` for this test.
+    - Run the test named above and print the result in exactly this format, with no other
+      output:
+      RESULT: statistic=<value>, p_value=<value>
+    - The code must run standalone from top to bottom with no undefined variables, other than
+      `given_data` itself.
+    """
 
-        response = client.chat.completions.create(
-            model=model_name,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=1500,
-        )
+            response = client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=1500,
+            )
 
-        response_text = response.choices[0].message.content
-        sandbox_result = run_sandbox(response_text, given_data)
+            response_text = response.choices[0].message.content
+            sandbox_result = run_sandbox(response_text, given_data)
 
-        if sandbox_result["success"]:
-            text = sandbox_result["stdout"]
-            try:
-                parts = text.split(",")
-                statistic_value = parts[0].split("=")
-                p_value = parts[1].split("=")
-                calculated = {"statistic": float(statistic_value[1]), "p_value": float(p_value[1])}
-            except Exception as e:
-                calculated = {"error": f"Could not parse output '{text}': {e}"}
-        else:
-            calculated = {"error": sandbox_result["error"]}
+            if sandbox_result["success"]:
+                text = sandbox_result["stdout"]
+                try:
+                    parts = text.split(",")
+                    statistic_value = parts[0].split("=")
+                    p_value = parts[1].split("=")
+                    calculated = {"statistic": float(statistic_value[1]), "p_value": float(p_value[1])}
+                except Exception as e:
+                    calculated = {"error": f"Could not parse output '{text}': {e}"}
+            else:
+                calculated = {"error": sandbox_result["error"]}
 
-        results[feature] = calculated #return in the dict 
+            results[feature] = calculated #return in the dict 
 
     new_log_entry = {"agent": "modelling_agent", "action": f"Ran one statistical test per feature. Results: {results}"}
     updated_log = state["decision_log"] + [new_log_entry]
