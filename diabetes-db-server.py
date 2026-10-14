@@ -1,5 +1,7 @@
 import pandas as pd
 import sqlite3
+import json
+
 from mcp.server.mcpserver import MCPServer
 
 mcp = MCPServer("diabetes-db")
@@ -8,7 +10,7 @@ DB_PATH = "diabetes.db"
 TABLE_NAME = "diabetes_binary"
 
 @mcp.tool()
-def list_columns() -> list[str]:
+def list_columns() -> str:
     """List all the column names in the table"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -18,7 +20,7 @@ def list_columns() -> list[str]:
     names_in_column = [c for c in columns if c != "Diabetes_binary"]#saw that diabetes_binary was included, which is not a feature, so we avoid that
     
     conn.close()
-    return names_in_column
+    return "\n".join(names_in_column)
 
 @mcp.tool()
 def describe_dtype_column() -> str:
@@ -44,7 +46,7 @@ def describe_dtype_column() -> str:
     return "\n".join(column_list)
     
 @mcp.tool()
-def run_query(chosen_columns: list[str]) -> list[dict]: #taking in column name instead of sql string is safer incase of sql injection
+def run_query(chosen_columns: list[str]) -> str: #taking in column name instead of sql string is safer incase of sql injection
     """Run a read-only SELECT query against the diabetes_binary table."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -68,7 +70,7 @@ def run_query(chosen_columns: list[str]) -> list[dict]: #taking in column name i
     df_dictionary = data_frame.to_dict(orient="records")#we turn dataframe into a python dictionary
 
     conn.close()
-    return df_dictionary
+    return json.dumps(df_dictionary)
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
