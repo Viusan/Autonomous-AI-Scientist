@@ -137,11 +137,12 @@ METHOD: HighBP = Chi-square test
 
     if response_text: #incase we get a empty string or nothing inside
         for line in response_text.split("\n"):
-                if line.startswith("METHOD:"): #if the line starts with method we want it
-                    rest = line[len("METHOD:"):]# everything after "METHOD:"
-                    parts = rest.split("=")# splits into [" BMI ", " Mann-Whitney U test"]
-                    feature = parts[0].strip()# removes leading/trailing spaces → "BMI"
-                    method = parts[1].strip()# removes leading/trailing spaces → "Mann-Whitney U test"
+            if "METHOD:" in line: #we check if "METHOD" is even in our currentresponse line
+                rest = line.split("METHOD:", 1)[1]
+                parts = rest.split("=")
+                if len(parts) == 2: #check if we produced two pieces, and remove usless * if it was included
+                    feature = parts[0].strip(" *")
+                    method = parts[1].strip(" *")
                     method_choice[feature] = method
 
     new_log_entry = {"agent": "methods_agent", "action": f"agent decided what method is best to use for calculating the statistics, and the decision it made: {response_text}"}
