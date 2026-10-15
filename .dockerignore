@@ -1,0 +1,8 @@
+.env
+.env.elastic
+.git
+__pycache__
+graph.png
+diabetes.db
+fasit_*.json
+#La til fasiten her slik at ikke agenten kan se fasiten for de plantede feilene
