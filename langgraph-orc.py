@@ -4,11 +4,17 @@ import io
 import contextlib
 import json
 import pandas as pd
+import asyncio
 
+from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 from typing import TypedDict
+from langchain.mcp import MCPAdapter
 from langgraph.graph import StateGraph, START, END
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from langchain_core.messages import ToolMessage
 
 load_dotenv()
 
@@ -16,9 +22,13 @@ api_key = os.getenv("OSBOT_API_KEY")
 base_url = os.getenv("OSBOT_BASE_URL")
 model_name = os.getenv("LOCAL_MODEL")
 
-#endret så tabellnavnet leses fra miljøvariabelen TABLE_NAME (satt i docker-compose.yml).
-#Flyttet hit øverst, utenfor alle funksjoner (ingen innrykk!), og fjernet fra data_agent.
-TABLE_NAME = os.getenv("TABLE_NAME", "diabetes_binary")
+model = ChatOpenAI( #this is for the langchain openai object (so we gonna use this for the tools)
+    model=model_name,
+    api_key="dummy",
+    base_url=base_url,
+    max_tokens=5000,
+    default_headers={"x-api-key": api_key},
+)
 
 client = OpenAI(
     api_key="dummy",
@@ -39,9 +49,50 @@ class ResearchState(TypedDict):
     decision_log: list[dict]
 
 def data_agent(state: ResearchState) -> dict:
-    #endret åpner databasen skrivebeskyttet, så den feiler tydelig hvis filen mangler
-    #(vanlig sqlite3.connect lager i stedet en ny, tom fil)
-    conn = sqlite3.connect("file:diabetes.db?mode=ro", uri=True)
+    #conversation history, we will add to this as tools are called to LLM gets a history of messages
+    messages = [HumanMessage(content="Find out which columns exist in the table, then fetch the data for what you percieve to be important factors that could cause diabetes, and decide when you are done.")]
+
+    async def explore_and_select():
+        async with MCPAdapter(Path("diabetes-db-server.py")) as adapter: #opens up commection with the mcp server as a seperate process and opens connection
+            tools = await adapter.list_tools() #asks server what tools are available
+            model_with_tools = model.bind_tools(tools)#create model version that has the tools we got from mcp server
+
+            response = await model_with_tools.ainvoke(messages)
+            final_columns = None
+
+            while response.tool_calls:
+                messages.append(response)#adds whatever model has prev called for so we get chat history and model sees its prev requests
+
+                for tool_call in response.tool_calls:
+                    requested_tool_name = tool_call["name"].split("<|")[0].strip() #our model is incosistant of how it gives the name i think
+                    matching_tool = next((t for t in tools if t.name == requested_tool_name), None)#find matching tool in list of tools, if none are found we return None
+                    raw_result = await matching_tool.ainvoke(tool_call["args"])#call tool with arguements given and get whatever tool returns
+                    
+                    #mcp doesnt always return in clean string so we unrwap it here
+                    if isinstance(raw_result, list):
+                        result_text = "".join(block.get("text", "") for block in raw_result if isinstance(block, dict))
+                    else:
+                        result_text = raw_result #if it wasnt a list then its just a string
+
+                    #append the tool message to our conversation
+                    tool_message = ToolMessage(content=result_text, tool_call_id=tool_call["id"])
+                    messages.append(tool_message)
+
+                    #if the llm decided it was done, we defined final columns variable
+                    if requested_tool_name == "finalized_selection":
+                        final_columns = tool_call["args"]["chosen_columns"]
+
+                if final_columns is not None:
+                    break 
+                #so here every tool that was invoked has gotten a response then we call the model again and decides if it needs to recall or not
+                response = await model_with_tools.ainvoke(messages)        
+            return final_columns
+
+    final_columns = asyncio.run(explore_and_select())
+    if final_columns is None: #incase llm returned None we just define as empty list
+        final_columns = []
+    
+    conn = sqlite3.connect("diabetes.db")
     cursor = conn.cursor()
 
     #endret TABLE_NAME-linjen som sto her er fjernet, den hentes nå fra toppen av filen
@@ -53,36 +104,9 @@ def data_agent(state: ResearchState) -> dict:
         raise RuntimeError(f"Fant ingen kolonner i tabellen '{TABLE_NAME}'. Sjekk at diabetes.db er den ekte filen.")
 
     features_in_database = [c for c in columns if c != "Diabetes_binary"]#saw that diabetes_binary was included, which is not a feature, so we avoid that
-
-    prompt = f"""
-    You have a list of features avilable which include information about a person and their lifestyle.
-    You are going to pick out which of these features are relevant for predicting diabetes.
-    Here is the list of features: {features_in_database}
-    Respond with ONLY a single JSON object and nothing else, no markdown code fences, no text before or after it.
-    Example of the exact shape required (do not copy the content it only serves as an example, copy only the structure), and also COPY the exact names of what is found in the list of features, including capitalzation:
-    {{"features": ["BMI", "HighBP", "PhysActivity"]}}
-    """
-
-    response = client.chat.completions.create(
-    model=model_name,
-    messages=[{"role": "user", "content": prompt}],
-    max_tokens=4000, #endret tokens til 4k
-    )
-
-    response_text = response.choices[0].message.content
-    #endret fjernet json.loads(...) og reviewer_verdict-linjen som ble limt inn her ved en feil.
-    #Disse skal bare være i reviewer_agent og ga KeyError: 'verdict'.
-
-    #try catch incase we get broken JSON
-    #(også tomt svar (None) havner her og gir fallback til alle features)
-    try:
-        featuresJSON = json.loads(response_text)
-        chosen_features = featuresJSON["features"]
-    except:
-        chosen_features = []
-
+    
     #build the sql string
-    validated_features = [c for c in chosen_features if c in features_in_database]#we do this incase the LLM returns slighty diff names for columns, then SQL query will be broken
+    validated_features = [c for c in final_columns if c in features_in_database]#we do this incase the LLM returns slighty diff names for columns, then SQL query will be broken
     if validated_features:
         columns_str = ", ".join(validated_features)
     else:
