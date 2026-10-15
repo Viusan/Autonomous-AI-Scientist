@@ -1,0 +1,6 @@
+.env
+.env.elastic
+.git
+__pycache__
+graph.png
+diabetes.db

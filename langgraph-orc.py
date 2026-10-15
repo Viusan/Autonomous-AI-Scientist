@@ -95,9 +95,14 @@ def data_agent(state: ResearchState) -> dict:
     conn = sqlite3.connect("diabetes.db")
     cursor = conn.cursor()
 
-    TABLE_NAME = "diabetes_binary"
+    #endret TABLE_NAME-linjen som sto her er fjernet, den hentes nå fra toppen av filen
     cursor.execute(f"PRAGMA table_info({TABLE_NAME})")#gets table info from diabtes_binary (pragma kinda diff check out online to see visualization)
-    columns = [row[1] for row in cursor.fetchall()]#row 1 from pragma displays column names 
+    columns = [row[1] for row in cursor.fetchall()]#row 1 from pragma displays column names
+
+    #endret så det blir tydelig feilmelding hvis tabellen ikke finnes (f.eks. tom plassholder-database)
+    if not columns:
+        raise RuntimeError(f"Fant ingen kolonner i tabellen '{TABLE_NAME}'. Sjekk at diabetes.db er den ekte filen.")
+
     features_in_database = [c for c in columns if c != "Diabetes_binary"]#saw that diabetes_binary was included, which is not a feature, so we avoid that
     
     #build the sql string
@@ -117,8 +122,8 @@ def data_agent(state: ResearchState) -> dict:
     conn.close()
 
     new_log_entry = {"agent": "data_agent", "action": f"agent gets the data it wants from diabetes.db, it chose to get {columns_str}"}
-    updated_log = state["decision_log"] + [new_log_entry] 
-    
+    updated_log = state["decision_log"] + [new_log_entry]
+
     #we return the stuff we want to update in our state
     return {"given_data": data_frame, "decision_log": updated_log}
 
@@ -232,10 +237,11 @@ def modelling_agent(state: ResearchState) -> dict:
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1500,
+                max_tokens=4000, #endret økt fra 1500. gpt-oss bruker tokens på resonnering, og lavt tak gir tomt svar (content=None)
             )
 
-            response_text = response.choices[0].message.content
+            #endret "or ''" så vi aldri sender None til exec(); tomt svar gir en vanlig parse-feil og nytt forsøk
+            response_text = response.choices[0].message.content or ""
             sandbox_result = run_sandbox(response_text, given_data)
 
             if sandbox_result["success"]:
@@ -250,7 +256,7 @@ def modelling_agent(state: ResearchState) -> dict:
             else:
                 calculated = {"error": sandbox_result["error"]}
 
-            results[feature] = calculated #return in the dict 
+            results[feature] = calculated #return in the dict
 
     new_log_entry = {"agent": "modelling_agent", "action": f"Ran one statistical test per feature. Results: {results}"}
     updated_log = state["decision_log"] + [new_log_entry]
@@ -281,10 +287,10 @@ def interpretation_agent(state: ResearchState) -> dict:
         else:
             line = f"- {feature}: statistic={result['statistic']}, p_value={result['p_value']}"
         result_list.append(line)
-    
+
     results_description = "\n".join(result_list)#we turn the result list from a list to a string
 
-    if state["reviewer_feedback"] and not state["reviewer_verdict"]:#if feedback was not empty and verdit is false 
+    if state["reviewer_feedback"] and not state["reviewer_verdict"]:#if feedback was not empty and verdit is false
         error_note = f"\nYour previous interpretation was not approved by the reviewer, and the reason was: {state['reviewer_feedback']}\nInterpret the info again."
     else:
         error_note = ""
@@ -308,10 +314,11 @@ sentences.
     response = client.chat.completions.create(
     model=model_name,
     messages=[{"role": "user", "content": prompt}],
-    max_tokens=1500,
+    max_tokens=4000, #endret økt fra 1500 (samme grunn som over: resonnering kan spise opp budsjettet)
     )
-    
-    response_text = response.choices[0].message.content
+
+    #endret "or ''" så interpretasjonen aldri blir None
+    response_text = response.choices[0].message.content or ""
 
     new_log_entry = {"agent": "interpretation_agent", "action": f"interpreting the data that was given from data_agent, response was: {response_text}"}
     updated_log = state["decision_log"] + [new_log_entry]
@@ -347,16 +354,31 @@ Example of the exact shape required (do not copy the content it only serves as a
     response = client.chat.completions.create(
     model=model_name,
     messages=[{"role": "user", "content": prompt}],
-    max_tokens=1500,
+    max_tokens=4000, #endret økt fra 1500, ellers kan svaret bli tomt (finish_reason="length")
     )
 
-    response_text = response.choices[0].message.content
-    json_reformat = json.loads(response_text)
+    # ENDRET: henter choice, og sjekker tomt svar FØR json.loads (før krasjet json.loads på None)
+    choice = response.choices[0]
+    response_text = choice.message.content
 
-    if json_reformat["verdict"]:
-        reviewer_verdict = True
-    else:
-        reviewer_verdict = False
+    if not response_text:
+        raise RuntimeError(
+            f"Tom respons fra LLM, finish_reason={choice.finish_reason}, "
+            f"message={choice.message.model_dump()}"
+        )
+
+    #endret tåligere parsing. Tar ut teksten mellom første "{" og siste "}" i tilfelle
+    #modellen likevel legger på kodeblokker eller tekst rundt JSON-en.
+    try:
+        start = response_text.index("{")
+        end = response_text.rindex("}") + 1
+        json_reformat = json.loads(response_text[start:end])
+    except (ValueError, json.JSONDecodeError):
+        raise RuntimeError(f"Kunne ikke lese JSON fra reviewer. Svar: {response_text!r}")
+
+    #endret .get() så manglende nøkler ikke gir KeyError midt i kjøringen
+    reviewer_verdict = bool(json_reformat.get("verdict", False))
+    reviewer_reason = json_reformat.get("reason", "")
 
     revision_counter = state["revision_counter"]
 
@@ -365,11 +387,11 @@ Example of the exact shape required (do not copy the content it only serves as a
     else:
         failed_log =""
 
-    new_log_entry = {"agent": "reviewer_agent", "action": f"Deciding if the interpretation was valid or not, this time the verdict was {reviewer_verdict} and reasoning was: {json_reformat['reason']}. {failed_log}"}
+    new_log_entry = {"agent": "reviewer_agent", "action": f"Deciding if the interpretation was valid or not, this time the verdict was {reviewer_verdict} and reasoning was: {reviewer_reason}. {failed_log}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
     return {"reviewer_feedback": response_text, "reviewer_verdict": reviewer_verdict, "revision_counter": state["revision_counter"]+1, "decision_log": updated_log}
-    
+
 def route_after_review(state: ResearchState) -> str:
     if state["revision_counter"] < 3: #just so we dont create a infinite loop
         if state["reviewer_verdict"]:
@@ -390,8 +412,8 @@ builder.add_node("interpretation_agent", interpretation_agent)
 builder.add_node("reviewer_agent", reviewer_agent)
 
 #wire the steps
-builder.add_edge(START, "data_agent")          
-builder.add_edge("data_agent", "methods_agent")  
+builder.add_edge(START, "data_agent")
+builder.add_edge("data_agent", "methods_agent")
 builder.add_edge("methods_agent", "modelling_agent")
 
 builder.add_conditional_edges(
@@ -402,7 +424,7 @@ builder.add_conditional_edges(
         "failed": END
     }
 )
- 
+
 builder.add_edge("interpretation_agent", "reviewer_agent")
 
 #this conditional node is so that if we get false from reviewer, we can loop back until its satisfied
@@ -418,8 +440,8 @@ builder.add_conditional_edges(
 #compile to something runnable
 graph = builder.compile()
 
-graph.get_graph().draw_mermaid_png(output_file_path="graph.png") #create a graph to vizualise how the nodes interact with each other
-
+#kommentert ut, fordi draw_mermaid_png henter bildet fra internett (blokkert i containeren)
+#graph.get_graph().draw_mermaid_png(output_file_path="graph.png") #create a graph to vizualise how the nodes interact with each other
 result = graph.invoke({
     "given_data": "",
     "method_choice": "",
