@@ -3,7 +3,7 @@ import importlib.util
 # De 18 modellene fra forskningsartikkelen.
 # klasse = hvor modellen finnes i Python
 # pakke = hvilken pakke som må være installert
-# treg = er modellen treg på ca. 200 000 rader? (da trenes den på et utvalg)
+# treg = er modellen treg på ca. 200 000 rader (trenes den på et utvalg)
 MODELLER = {
     "AdaBoost": dict(klasse="sklearn.ensemble.AdaBoostClassifier", pakke="sklearn"),
     "Extra Trees": dict(klasse="sklearn.ensemble.ExtraTreesClassifier", pakke="sklearn"),

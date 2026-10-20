@@ -16,12 +16,12 @@ _cache = {}  # tabell -> (X_train, X_test, y_train, y_test, info), så vi ikke l
 
 
 #tools som programmet kan kalle. 
-def sjekk_tabell(tabell):
+def sjekk_tabell(tabell): # Stopper alt hvis tabellnavnet ikke står på listen over tillate tabeller. Agenten kan ikke be om en tilfeldig tabell.
     if tabell not in TILLATTE_TABELLER:
         raise ValueError(f"Unknown table '{tabell}'. Allowed: {TILLATTE_TABELLER}")
 
 
-def hent_tabell(tabell):
+def hent_tabell(tabell): # Leser hele tabellen fra databasen inn en pandas-tabell.
     sjekk_tabell(tabell)
     conn = sqlite3.connect(DB)
     df = pd.read_sql(f"SELECT * FROM {tabell}", conn)
@@ -29,7 +29,7 @@ def hent_tabell(tabell):
     return df
 
 
-def tool_list_tables():
+def tool_list_tables(): # Viser tabellen som finnes med antall rader.
     conn = sqlite3.connect(DB)
     ut = []
     for t in TILLATTE_TABELLER:
@@ -42,7 +42,7 @@ def tool_list_tables():
     return ut
 
 
-def tool_describe_table(table):
+def tool_describe_table(table): # viser for hver kolonne minste, største, snitt og antall manglende verdier.
     df = hent_tabell(table)
     kolonner = {}
     for c in df.columns:
@@ -55,7 +55,7 @@ def tool_list_models():
     return tilgjengelige_modeller()
 
 
-def last_og_del(tabell):
+def last_og_del(tabell): #Gjør tabellen klar til trening og testing.
     # Samme data og samme deling hver gang: fjern tomme rader, 80/20, random_state=42
     if tabell in _cache:
         return _cache[tabell]
@@ -71,7 +71,7 @@ def last_og_del(tabell):
 
 
 def tool_train_model(table, model, params=None):
-    if model not in MODELLER:
+    if model not in MODELLER: # Sjekker at modellen finnes.
         raise ValueError(f"Unknown model '{model}'. Use list_models.")
     m = MODELLER[model]
     if m.get("ikke_klassifikator"):
@@ -79,7 +79,7 @@ def tool_train_model(table, model, params=None):
 
     X_train, X_test, y_train, y_test, info = last_og_del(table)
 
-    # Finn klassen ut fra stien, f.eks. sklearn.ensemble.RandomForestClassifier
+    # Finn klassen ut fra stien i ml_biblotek.
     modul, klassenavn = m["klasse"].rsplit(".", 1)
     klasse = getattr(importlib.import_module(modul), klassenavn)
 
