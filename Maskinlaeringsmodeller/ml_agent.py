@@ -19,6 +19,8 @@ client = OpenAI(
 )
 model_name = os.getenv("LOCAL_MODEL")
 
+#finn ut hvilken modell som best forutsier diabetes, se på dataen først, prøv minst 4 modeller, og avslutt med submit_report. Ikke finn på tall.
+
 SYSTEM = """You are an autonomous research assistant working on a health survey dataset (BRFSS 2015).
 The goal: find out which machine learning model best predicts whether a person has diabetes
 (target column Diabetes_binary), and report it for the results section of a research article.
@@ -27,7 +29,7 @@ You have tools. Decide yourself which tools to call and in which order. Look at 
 try at least 4 different models (mix simple and strong ones), compare them, and finish by calling submit_report.
 Only use numbers that train_model returned. Do not invent numbers."""
 
-# submit_report ligger i agenten, ikke i MCP-serveren: det er agentens eget svar, ikke et verktøy for data/ML
+#beskrivelsen av tool-et LLM-en bruker for å levere svaret: beste modell, accuracy, AUC, begrunnelse og eventuelle notater om dataen.
 SUBMIT_TOOL = {"type": "function", "function": {
     "name": "submit_report",
     "description": "Submit your final conclusion. Call this once when you are done. Use only numbers returned by train_model.",
@@ -39,6 +41,7 @@ SUBMIT_TOOL = {"type": "function", "function": {
         "required": ["best_model", "accuracy", "auc", "reasoning"]}}}
 
 
+#Hvis modellen gir en feil eller mister forbindelsen, venter den noen sekunder og prøver på nytt, opptil 4 ganger. Hvis det fortsatt feiler, gir den None, og agenten stopper.
 def spor_llm(messages, tools, forsok=4):
     for i in range(forsok):
         try:
@@ -72,7 +75,7 @@ async def kjor_agent(tabell, maks_steg=25):
             tools.append(SUBMIT_TOOL)
             print("Tools from MCP server:", [t.name for t in mcp_tools])
 
-            messages = [{"role": "system", "content": SYSTEM},
+            messages = [{"role": "system", "content": SYSTEM}, # Skriver det om slik at LLM-en forstår hva som er skrevet og lagrer resultatene.
                         {"role": "user", "content": f"Use the table '{tabell}'."}]
 
             for steg in range(maks_steg):
@@ -82,8 +85,7 @@ async def kjor_agent(tabell, maks_steg=25):
                     break
                 msg = svar.choices[0].message
                 kall = msg.tool_calls or []
-                # Modellen skriver noen ganger rare ting etter tool-navnet (f.eks. "train_model<|channel|>commentary").
-                # Vi klipper det bort, slik gruppa gjør i data_agent.
+                
                 for c in kall:
                     c.function.name = c.function.name.split("<|")[0].strip()
 
@@ -108,7 +110,7 @@ async def kjor_agent(tabell, maks_steg=25):
                             rapport.update(args)
                             resultat = {"status": "report received, you are done"}
                         else:
-                            ut = await session.call_tool(navn, args)   # <-- her går kallet til MCP-serveren
+                            ut = await session.call_tool(navn, args)   # her går kallet til MCP-serveren
                             tekst = "".join(b.text for b in ut.content if hasattr(b, "text"))
                             feilet = getattr(ut, "isError", None) or getattr(ut, "is_error", False)  # mcp 1.x / 2.x
                             resultat = {"error": tekst} if feilet else json.loads(tekst)
