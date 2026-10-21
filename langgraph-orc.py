@@ -92,6 +92,7 @@ def data_agent(state: ResearchState) -> dict:
     if final_columns is None: #incase llm returned None we just define as empty list
         final_columns = []
     
+    #DETTE KAN IKKE BLI TIL TOOL PÅ GRUNN AV CONTEXT WINDOW
     conn = sqlite3.connect("diabetes.db")
     cursor = conn.cursor()
 
