@@ -10,6 +10,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 from typing import TypedDict
+from mcp_helpers import fetch_dataframe
 from langchain.mcp import MCPAdapter
 from langgraph.graph import StateGraph, START, END
 from langchain_openai import ChatOpenAI
@@ -38,7 +39,7 @@ client = OpenAI(
 
 #this is stategraph, it's a data container (or shared memory) that gets passed around the agents.
 class ResearchState(TypedDict):
-    given_data: pd.DataFrame
+    chosen_columns: list[str]
     method_choice: dict
     calculated_data: dict
     interpretation: str
@@ -53,89 +54,79 @@ def data_agent(state: ResearchState) -> dict:
     messages = [HumanMessage(content="Find out which columns exist in the table, then fetch the data for what you percieve to be important factors that could cause diabetes, and decide when you are done.")]
 
     async def explore_and_select():
-        async with MCPAdapter(Path("diabetes-db-server.py")) as adapter: #opens up commection with the mcp server as a seperate process and opens connection
-            tools = await adapter.list_tools() #asks server what tools are available
-            model_with_tools = model.bind_tools(tools)#create model version that has the tools we got from mcp server
+        async with MCPAdapter(Path("diabetes-db-server.py")) as adapter:
+            tools = await adapter.list_tools()
+            model_with_tools = model.bind_tools(tools)
 
             response = await model_with_tools.ainvoke(messages)
             final_columns = None
+            #had issue of being stuck while running program, seeing if this fixes
+            loop_count = 0
+            max_loops = 10
 
             while response.tool_calls:
-                messages.append(response)#adds whatever model has prev called for so we get chat history and model sees its prev requests
+                loop_count = loop_count + 1
+                messages.append(response)
 
                 for tool_call in response.tool_calls:
-                    requested_tool_name = tool_call["name"].split("<|")[0].strip() #our model is incosistant of how it gives the name i think
-                    matching_tool = next((t for t in tools if t.name == requested_tool_name), None)#find matching tool in list of tools, if none are found we return None
-                    raw_result = await matching_tool.ainvoke(tool_call["args"])#call tool with arguements given and get whatever tool returns
-                    
-                    #mcp doesnt always return in clean string so we unrwap it here
+                    requested_tool_name = tool_call["name"].split("<|")[0].strip()
+                    matching_tool = next((t for t in tools if t.name == requested_tool_name), None)
+                    raw_result = await matching_tool.ainvoke(tool_call["args"])
+
                     if isinstance(raw_result, list):
                         result_text = "".join(block.get("text", "") for block in raw_result if isinstance(block, dict))
                     else:
-                        result_text = raw_result #if it wasnt a list then its just a string
+                        result_text = raw_result
 
-                    #append the tool message to our conversation
                     tool_message = ToolMessage(content=result_text, tool_call_id=tool_call["id"])
                     messages.append(tool_message)
 
-                    #if the llm decided it was done, we defined final columns variable
                     if requested_tool_name == "finalized_selection":
                         final_columns = tool_call["args"]["chosen_columns"]
 
                 if final_columns is not None:
-                    break 
-                #so here every tool that was invoked has gotten a response then we call the model again and decides if it needs to recall or not
-                response = await model_with_tools.ainvoke(messages)        
+                    break
+                if loop_count >= max_loops:
+                    break
+
+                response = await model_with_tools.ainvoke(messages)
             return final_columns
 
     final_columns = asyncio.run(explore_and_select())
-    if final_columns is None: #incase llm returned None we just define as empty list
+    if final_columns is None: #safeguard incase we get nothing 
         final_columns = []
-    
-    #DETTE KAN IKKE BLI TIL TOOL PÅ GRUNN AV CONTEXT WINDOW
-    conn = sqlite3.connect("diabetes.db")
-    cursor = conn.cursor()
 
-    TABLE_NAME = "diabetes_binary"
-    cursor.execute(f"PRAGMA table_info({TABLE_NAME})")#gets table info from diabtes_binary (pragma kinda diff check out online to see visualization)
-    columns = [row[1] for row in cursor.fetchall()]#row 1 from pragma displays column names 
-    features_in_database = [c for c in columns if c != "Diabetes_binary"]#saw that diabetes_binary was included, which is not a feature, so we avoid that
-    
-    #build the sql string
-    validated_features = [c for c in final_columns if c in features_in_database]#we do this incase the LLM returns slighty diff names for columns, then SQL query will be broken
-    if validated_features:
-        columns_str = ", ".join(validated_features)
-    else:
-        #if our earlier fails then we still get a valid sql string from this
-        columns_str = ", ".join(features_in_database)
-
-    query = f"SELECT {columns_str}, Diabetes_binary FROM {TABLE_NAME}"
-
-    #dataframe is a returned as a python object we can work with
-    #good thing here is column name is attached to data (ask claude to visualize if you dont understand)
-    data_frame = pd.read_sql(query, conn)
-
-    conn.close()
-
-    new_log_entry = {"agent": "data_agent", "action": f"agent gets the data it wants from diabetes.db, it chose to get {columns_str}"}
+    new_log_entry = {"agent": "data_agent", "action": f"agent gets the data it wants from diabetes.db, it chose: {final_columns}"}
     updated_log = state["decision_log"] + [new_log_entry] 
     
     #we return the stuff we want to update in our state
-    return {"given_data": data_frame, "decision_log": updated_log}
-
-def describe_columns(data) -> str:#we reuse this two times, so better to just create a function
-    #so for every item in our list we seperate is with a new line, so it will look like a list now describing the diff columns and data type
-    column_list = []
-    for col in data.columns:
-        if col == "Diabetes_binary":
-            continue
-        line = f"- {col}: {data[col].dtype}, {data[col].nunique()} unique values"
-        column_list.append(line)
-    return "\n".join(column_list)
+    return {"chosen_columns": final_columns, "decision_log": updated_log}
 
 def methods_agent(state: ResearchState) -> dict:
-    data = state["given_data"]
-    column_description = describe_columns(data)
+    chosen_columns = state["chosen_columns"]
+
+    async def fetch_column_info():
+        async with MCPAdapter(Path("diabetes-db-server.py")) as adapter:
+            tools = await adapter.list_tools()
+
+            describe_tool = None
+            for tool in tools:
+                if tool.name == "describe_dtype_column":
+                    describe_tool = tool
+
+            raw_result = await describe_tool.ainvoke({"chosen_columns": chosen_columns})
+
+            if isinstance(raw_result, list):
+                result_text = ""
+                for block in raw_result:
+                    if isinstance(block, dict):
+                        result_text = result_text + block.get("text", "")
+            else:
+                result_text = raw_result
+
+            return result_text
+
+    column_description = asyncio.run(fetch_column_info())
 
     prompt = f"""You are a biostatistics assistant helping choose appropriate statistical tests.
 
@@ -161,20 +152,20 @@ METHOD: BMI = Mann-Whitney U test
 METHOD: HighBP = Chi-square test
 """
     response = client.chat.completions.create(
-    model=model_name,
-    messages=[{"role": "user", "content": prompt}],
-    max_tokens=9000,
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=9000,
     )
 
     response_text = response.choices[0].message.content
     method_choice = {}
 
-    if response_text: #incase we get a empty string or nothing inside
+    if response_text:
         for line in response_text.split("\n"):
-            if "METHOD:" in line: #we check if "METHOD" is even in our currentresponse line
+            if "METHOD:" in line:
                 rest = line.split("METHOD:", 1)[1]
                 parts = rest.split("=")
-                if len(parts) == 2: #check if we produced two pieces, and remove usless * if it was included
+                if len(parts) == 2:
                     feature = parts[0].strip(" *")
                     method = parts[1].strip(" *")
                     method_choice[feature] = method
@@ -197,7 +188,7 @@ def run_sandbox(code: str, given_data) -> dict: #utility function
 
 def modelling_agent(state: ResearchState) -> dict:
     method_choice = state["method_choice"]
-    given_data = state["given_data"]
+    given_data = fetch_dataframe(state["chosen_columns"])
     results = {}
 
     if not method_choice:
@@ -422,8 +413,8 @@ graph = builder.compile()
 graph.get_graph().draw_mermaid_png(output_file_path="graph.png") #create a graph to vizualise how the nodes interact with each other
 
 result = graph.invoke({
-    "given_data": "",
-    "method_choice": "",
+    "chosen_columns": [],
+    "method_choice": {},
     "calculated_data": {},
     "interpretation": "",
     "reviewer_feedback": "",

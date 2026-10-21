@@ -23,21 +23,30 @@ def list_columns() -> str:
     return "\n".join(names_in_column)
 
 @mcp.tool()
-def describe_dtype_column() -> str:
-    """Return data type and unique-value-count summary for each column."""
+def describe_dtype_column(chosen_columns: list[str] = []) -> str:
+    """Return data type and unique-value-count summary for each column. If chosen_columns is given, only describe those columns; otherwise describe every column in the table."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    cursor.execute(f"PRAGMA table_info({TABLE_NAME})")#gets table info from diabtes_binary (pragma kinda diff check out online to see visualization)
-    columns = [row[1] for row in cursor.fetchall()]#row 1 from pragma displays column names 
-    names_in_column = [c for c in columns if c != "Diabetes_binary"]#saw that diabetes_binary was included, which is not a feature, so we avoid that
-    
+    cursor.execute(f"PRAGMA table_info({TABLE_NAME})")
+    columns = [row[1] for row in cursor.fetchall()]
+    names_in_column = [c for c in columns if c != "Diabetes_binary"]
+
+    if chosen_columns:
+        validated_features = [c for c in chosen_columns if c in names_in_column]#keep those names that exist
+        if validated_features: #if its empty we just use everything
+            columns_to_describe = validated_features
+        else:
+            columns_to_describe = names_in_column
+    else:
+        columns_to_describe = names_in_column
+
     column_list = []
 
-    for column_name in names_in_column:
+    for column_name in columns_to_describe:
         df = pd.read_sql(f"SELECT {column_name} FROM {TABLE_NAME}", conn)
         dtype = df[column_name].dtype
-        unique_count = df[column_name].nunique() #returns how many distinct values show up in column like if only 0 and 1 we get 2.
+        unique_count = df[column_name].nunique()
 
         line = f"- {column_name}: {dtype}, {unique_count} unique values"
         column_list.append(line)
