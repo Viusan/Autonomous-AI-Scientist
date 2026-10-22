@@ -130,7 +130,7 @@ def methods_agent(state: ResearchState) -> dict:
 
     prompt = f"""You are a biostatistics assistant helping choose appropriate statistical tests.
 
-Here are the candidate features and their data types:
+Here are the candidate features and their data types, and how many unique values each one has:
 {column_description}
 
 The outcome you are testing against is Diabetes_binary (0 = no diabetes/prediabetes, 1 = yes), a binary variable.
@@ -291,9 +291,11 @@ Methods used (feature = test):
 
 Based on these results, what can we say about the relationship between these features and
 diabetes? Keep in mind this dataset has a very large sample size, so even a small, practically
-unimportant difference can produce a statistically significant p-value — be careful not to
-overstate any finding. Answer briefly, covering the features together, in a maximum of 5
-sentences.
+unimportant difference can produce a statistically significant p-value, be careful not to
+overstate any finding. This data is observational and cross-sectional, so describe any
+relationship only as a statistical association, never as causation, do not use words like
+"causes", "leads to", or "results in". Answer briefly, covering the features together, in a
+maximum of 5 sentences.
 {error_note}
 """
 
