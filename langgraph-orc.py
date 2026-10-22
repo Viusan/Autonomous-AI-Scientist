@@ -48,6 +48,7 @@ class ResearchState(TypedDict):
     revision_counter: int
     modelling_counter: int
     decision_log: list[dict]
+    scientific_report: str
 
 def data_agent(state: ResearchState) -> dict:
     #conversation history, we will add to this as tools are called to LLM gets a history of messages
@@ -214,9 +215,16 @@ def modelling_agent(state: ResearchState) -> dict:
       not attempt any file access, network access, or database connection — work only with the
       `given_data` variable already provided to you.
     - Only use the `{feature}` and `Diabetes_binary` columns from `given_data` for this test.
-    - Run the test named above and print the result in exactly this format, with no other
-      output:
+    - Run the test named above and print the result on its own line, in exactly this format:
       RESULT: statistic=<value>, p_value=<value>
+    - Also print a second line showing the direction of the relationship, so it can be
+      reported alongside the test result:
+      - If the test is a Chi-square test: compute the proportion of Diabetes_binary==1 within
+        each unique value of `{feature}`, and print it as:
+        GROUP_SUMMARY: <your result here>
+      - If the test is a Mann-Whitney U test: compute the median of `{feature}` separately for
+        Diabetes_binary==0 and Diabetes_binary==1, and print it as:
+        GROUP_SUMMARY: <your result here>
     - The code must run standalone from top to bottom with no undefined variables, other than
       `given_data` itself.
     """
@@ -229,16 +237,31 @@ def modelling_agent(state: ResearchState) -> dict:
 
             response_text = response.choices[0].message.content
             sandbox_result = run_sandbox(response_text, given_data)
-
+            
             if sandbox_result["success"]:
                 text = sandbox_result["stdout"]
-                try:
-                    parts = text.split(",")
-                    statistic_value = parts[0].split("=")
-                    p_value = parts[1].split("=")
-                    calculated = {"statistic": float(statistic_value[1]), "p_value": float(p_value[1])}
-                except Exception as e:
-                    calculated = {"error": f"Could not parse output '{text}': {e}"}
+                result_line = None
+                summary_line = None
+            
+                for line in text.split("\n"):
+                    if line.startswith("RESULT:"):
+                        result_line = line
+                    if line.startswith("GROUP_SUMMARY:"):
+                        summary_line = line
+            
+                if result_line:
+                    try:
+                        rest = result_line.split("RESULT:", 1)[1]
+                        parts = rest.split(",")
+                        statistic_value = parts[0].split("=")
+                        p_value = parts[1].split("=")
+                        calculated = {"statistic": float(statistic_value[1]), "p_value": float(p_value[1])}
+                        if summary_line:
+                            calculated["group_summary"] = summary_line.split("GROUP_SUMMARY:", 1)[1].strip()
+                    except Exception as e:
+                        calculated = {"error": f"Could not parse output '{text}': {e}"}
+                else:
+                    calculated = {"error": f"No RESULT line found in output '{text}'"}
             else:
                 calculated = {"error": sandbox_result["error"]}
 
@@ -267,11 +290,13 @@ def interpretation_agent(state: ResearchState) -> dict:
     calculated= state["calculated_data"]#read what modelling_agent produced
     result_list = []
 
-    for feature, result in calculated.items():#just checking through which methods failed and which didnt
+    for feature, result in calculated.items():
         if "error" in result:
             line = f"- {feature}: test failed with error: {result['error']}"
         else:
             line = f"- {feature}: statistic={result['statistic']}, p_value={result['p_value']}"
+            if "group_summary" in result:
+                line = line + f", group summary: {result['group_summary']}"
         result_list.append(line)
     
     results_description = "\n".join(result_list)#we turn the result list from a list to a string
@@ -345,7 +370,14 @@ Example of the exact shape required (do not copy the content it only serves as a
     )
 
     response_text = response.choices[0].message.content
-    json_reformat = json.loads(response_text)
+
+    if response_text:
+        try:
+            json_reformat = json.loads(response_text)
+        except Exception as e:
+            json_reformat = {"verdict": False, "reason": f"Could not parse reviewer response as JSON: {e}"}
+    else:
+        json_reformat = {"verdict": False, "reason": "Reviewer agent returned no content to parse."}
 
     if json_reformat["verdict"]:
         reviewer_verdict = True
@@ -373,6 +405,59 @@ def route_after_review(state: ResearchState) -> str:
     else:
         return "approved"
 
+def report_agent(state: ResearchState) -> dict:
+    prompt = f"""You are writing the Methods, Results, and Discussion sections of a scientific
+report, based on a statistical analysis of a health survey dataset.
+
+Features analyzed: {state['chosen_columns']}
+
+Statistical tests used (feature = test):
+{state['method_choice']}
+
+Raw results (feature: statistic and p-value):
+{state['calculated_data']}
+
+Reviewed interpretation of these results:
+{state['interpretation']}
+
+Write this as a short scientific report section with these parts, in this order:
+
+Methods: Briefly describe that each feature was statistically tested individually against
+diabetes status, listing which test was used for which type of feature, and why
+(e.g. Chi-square for categorical variables, Mann-Whitney U test for continuous variables).
+
+Results: Report the statistical findings for each feature, referencing the actual statistic
+and p-value.
+
+Discussion: Based only on the reviewed interpretation above, discuss what each result suggests
+about a possible association between that feature and diabetes status — for example, whether
+higher or lower values of the feature tend to appear more often among people with diabetes.
+Do not introduce any claim, direction, or relationship that isn't already stated in the
+reviewed interpretation.
+
+Limitations: State clearly that this data is observational and cross-sectional, so these are
+associations only, not causal relationships, and that effect size/clinical significance was
+not assessed here.
+
+Do not use causal language anywhere (no "causes", "leads to", "results in"). Write in a formal
+academic tone. This is only the statistical-testing portion of a larger report — do not mention
+machine learning models or predictive performance, since that is a separate component not
+included here.
+"""
+
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=2000,
+    )
+
+    response_text = response.choices[0].message.content
+
+    new_log_entry = {"agent": "report_agent", "action": "Generated the statistical-testing section of the scientific report."}
+    updated_log = state["decision_log"] + [new_log_entry]
+
+    return {"scientific_report": response_text, "decision_log": updated_log}
+
 #create a mini graph using LangGraph
 builder = StateGraph(ResearchState) #we tie it to our state schema
 
@@ -382,6 +467,7 @@ builder.add_node("methods_agent", methods_agent)
 builder.add_node("modelling_agent", modelling_agent)
 builder.add_node("interpretation_agent", interpretation_agent)
 builder.add_node("reviewer_agent", reviewer_agent)
+builder.add_node("report_agent", report_agent)
 
 #wire the steps
 builder.add_edge(START, "data_agent")          
@@ -404,10 +490,12 @@ builder.add_conditional_edges(
     "reviewer_agent", route_after_review,
     {
         #if route_after_review function returns approved we end, or we loop back into interpretation
-        "approved": END,
+        "approved": "report_agent",
         "needs_revision": "interpretation_agent"
     },
 )
+
+builder.add_edge("report_agent", END)
 
 #compile to something runnable
 graph = builder.compile()
@@ -424,6 +512,7 @@ result = graph.invoke({
     "revision_counter": 0,
     "modelling_counter": 0,
     "decision_log": [],
+    "scientific_report": "",
 })
 
 #print("Interpretation: ", result["interpretation"])
@@ -431,3 +520,5 @@ result = graph.invoke({
 #print("Given data: ", result["given_data"])
 print("Decision log: ", result["decision_log"])
 #print("Calculated data: ", result["calculated_data"])
+print("----------------------------------------------- THIS IS THE REPORT -----------------------------------------------")
+print("Scientific report: ", result["scientific_report"])
