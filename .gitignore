@@ -2,3 +2,4 @@
 diabetes.db
 __pycache__
 mcp-diabetes-test.py
+logs/
