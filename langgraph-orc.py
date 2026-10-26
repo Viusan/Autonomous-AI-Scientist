@@ -169,7 +169,8 @@ METHOD: HighBP = Chi-square test
                 if len(parts) == 2:
                     feature = parts[0].strip(" *")
                     method = parts[1].strip(" *")
-                    method_choice[feature] = method
+                    if feature != "Diabetes_binary":
+                        method_choice[feature] = method
 
     new_log_entry = {"agent": "methods_agent", "action": f"agent decided what method is best to use for calculating the statistics, and the decision it made: {response_text}"}
     updated_log = state["decision_log"] + [new_log_entry]
@@ -218,13 +219,16 @@ def modelling_agent(state: ResearchState) -> dict:
     - Run the test named above and print the result on its own line, in exactly this format:
       RESULT: statistic=<value>, p_value=<value>
     - Also print a second line showing the direction of the relationship, so it can be
-      reported alongside the test result:
+      reported alongside the test result. This line must describe what the numbers mean in
+      plain words, not just a bare dictionary, so it can be understood correctly without
+      needing to see this code:
       - If the test is a Chi-square test: compute the proportion of Diabetes_binary==1 within
         each unique value of `{feature}`, and print it as:
-        GROUP_SUMMARY: <your result here>
+        GROUP_SUMMARY: proportion with diabetes for each value of {feature}: <your result here>
       - If the test is a Mann-Whitney U test: compute the median of `{feature}` separately for
         Diabetes_binary==0 and Diabetes_binary==1, and print it as:
-        GROUP_SUMMARY: <your result here>
+        GROUP_SUMMARY: median {feature} for Diabetes_binary=0 group: <value>; median {feature}
+        for Diabetes_binary=1 group: <value>
     - The code must run standalone from top to bottom with no undefined variables, other than
       `given_data` itself.
     """
@@ -405,55 +409,97 @@ def route_after_review(state: ResearchState) -> str:
     else:
         return "approved"
 
-def report_agent(state: ResearchState) -> dict:
-    prompt = f"""You are writing the Methods, Results, and Discussion sections of a scientific
-report, based on a statistical analysis of a health survey dataset.
+import glob
 
-Features analyzed: {state['chosen_columns']}
+def load_ml_results():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_files = glob.glob(os.path.join(script_dir, "Maskinlaeringsmodeller", "logs", "*.json"))
+    if not log_files:
+        return None
+
+    log_files_sorted = sorted(log_files, key=os.path.getmtime, reverse=True)
+
+    for log_file in log_files_sorted:
+        with open(log_file, "r") as f:
+            ml_data = json.load(f)
+        if ml_data.get("check", {}).get("report_submitted"):
+            return ml_data
+
+    return None
+
+
+def report_agent(state: ResearchState) -> dict:
+    ml_data = load_ml_results()
+    print("DEBUG ml_data:", ml_data)
+
+    if ml_data:
+        ml_section_text = f"""
+A separate predictive modeling component also tested several machine learning classifiers
+on the same dataset. Results per model tried, including each model's feature importance
+where available:
+{ml_data['trained']}
+
+The model selected as best, with its reasoning:
+{ml_data['report']}
+"""
+    else:
+        ml_section_text = "No predictive modeling results are available."
+
+    prompt = f"""You are writing the Methods, Results, and Discussion sections of a scientific
+report, based on a statistical analysis of a health survey dataset, plus a separate predictive
+modeling component.
+
+Features analyzed (statistical testing): {state['chosen_columns']}
 
 Statistical tests used (feature = test):
 {state['method_choice']}
 
-Raw results (feature: statistic and p-value):
+Raw statistical results (feature: statistic and p-value):
 {state['calculated_data']}
 
 Reviewed interpretation of these results:
 {state['interpretation']}
 
-Write this as a short scientific report section with these parts, in this order:
+Predictive modeling results:
+{ml_section_text}
 
-Methods: Briefly describe that each feature was statistically tested individually against
-diabetes status, listing which test was used for which type of feature, and why
-(e.g. Chi-square for categorical variables, Mann-Whitney U test for continuous variables).
+Write this as a short scientific report with these parts, in this order:
+
+Methods: Briefly describe both components - that each feature was statistically tested
+individually against diabetes status, and that several machine learning classifiers were
+separately trained and compared to predict diabetes status directly.
 
 Results: Report the statistical findings for each feature, referencing the actual statistic
-and p-value.
+and p-value. Then report the machine learning results, listing each model tried with its
+accuracy and AUC, and which model performed best. For the best-performing model, also report
+its top few features by feature_importance, if that field is available for it.
 
-Discussion: Based only on the reviewed interpretation above, discuss what each result suggests
-about a possible association between that feature and diabetes status — for example, whether
-higher or lower values of the feature tend to appear more often among people with diabetes.
-Do not introduce any claim, direction, or relationship that isn't already stated in the
-reviewed interpretation.
+Discussion: Based only on the reviewed interpretation above, discuss what each statistical
+result suggests about a possible association with diabetes status. Then discuss what the
+predictive modeling results suggest about how well diabetes can be predicted overall, and
+whether the features the best model relied on most (per its feature_importance) line up with
+the features found statistically significant above. Do not introduce any claim that isn't
+already stated in the reviewed interpretation or the predictive modeling results provided
+above.
 
-Limitations: State clearly that this data is observational and cross-sectional, so these are
-associations only, not causal relationships, and that effect size/clinical significance was
-not assessed here.
+Limitations: State that this data is observational and cross-sectional, so these are
+associations only, not causal relationships. Also state clearly that the predictive models
+were trained on the raw, imbalanced dataset without any class-imbalance handling (such as
+oversampling), so accuracy alone may be misleading relative to the majority-class baseline,
+and note the models' recall for the diabetic class specifically.
 
 Do not use causal language anywhere (no "causes", "leads to", "results in"). Write in a formal
-academic tone. This is only the statistical-testing portion of a larger report — do not mention
-machine learning models or predictive performance, since that is a separate component not
-included here.
+academic tone.
 """
-
     response = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=2000,
+        max_tokens=2500,
     )
 
     response_text = response.choices[0].message.content
 
-    new_log_entry = {"agent": "report_agent", "action": "Generated the statistical-testing section of the scientific report."}
+    new_log_entry = {"agent": "report_agent", "action": "Generated the full report, combining statistical testing and predictive modeling results."}
     updated_log = state["decision_log"] + [new_log_entry]
 
     return {"scientific_report": response_text, "decision_log": updated_log}
