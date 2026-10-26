@@ -60,6 +60,8 @@ def data_agent(state: ResearchState) -> dict:
             model_with_tools = model.bind_tools(tools)
 
             response = await model_with_tools.ainvoke(messages)
+            print(f"[data_agent] first response, tool_calls = {response.tool_calls}")   #FOR DEBUG REMOVE LATER
+
             final_columns = None
             #had issue of being stuck while running program, seeing if this fixes
             loop_count = 0
@@ -72,6 +74,13 @@ def data_agent(state: ResearchState) -> dict:
                 for tool_call in response.tool_calls:
                     requested_tool_name = tool_call["name"].split("<|")[0].strip()
                     matching_tool = next((t for t in tools if t.name == requested_tool_name), None)
+
+                    print(f"[data_agent] loop {loop_count}: model called '{requested_tool_name}' with args {tool_call['args']}")   #for debug remove later
+
+                    if matching_tool is None:   # NEW
+                        print(f"[data_agent] WARNING: no tool named '{requested_tool_name}' exists, skipping")   # NEW
+                        continue   # NEW
+
                     raw_result = await matching_tool.ainvoke(tool_call["args"])
 
                     if isinstance(raw_result, list):
@@ -212,9 +221,10 @@ def modelling_agent(state: ResearchState) -> dict:
     from anywhere else.
 
     Requirements:
-    - Use only these libraries: scipy.stats, numpy, pandas. Do not import anything else, and do
-      not attempt any file access, network access, or database connection — work only with the
-      `given_data` variable already provided to you.
+    - Use only these libraries: scipy.stats, numpy, pandas, and statsmodels (for any test not
+      available in scipy, such as a trend test). Do not import anything else, and do not attempt
+      any file access, network access, or database connection — work only with the `given_data`
+      variable already provided to you.
     - Only use the `{feature}` and `Diabetes_binary` columns from `given_data` for this test.
     - Run the test named above and print the result on its own line, in exactly this format:
       RESULT: statistic=<value>, p_value=<value>
@@ -229,6 +239,12 @@ def modelling_agent(state: ResearchState) -> dict:
         Diabetes_binary==0 and Diabetes_binary==1, and print it as:
         GROUP_SUMMARY: median {feature} for Diabetes_binary=0 group: <value>; median {feature}
         for Diabetes_binary=1 group: <value>
+      - For any other test (e.g. an independent-samples t-test, ANOVA, or anything else not
+        listed above): choose whichever group summary best matches what the test is comparing
+        (for example, the mean of `{feature}` for each Diabetes_binary group, if the test
+        compares means), and print it in the same clearly labeled style:
+        GROUP_SUMMARY: <a clearly labeled description of the group difference>
+      Always print a GROUP_SUMMARY line, no matter which test was used above — never skip it.
     - The code must run standalone from top to bottom with no undefined variables, other than
       `given_data` itself.
     """
