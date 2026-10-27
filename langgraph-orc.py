@@ -49,6 +49,10 @@ class ResearchState(TypedDict):
     modelling_counter: int
     decision_log: list[dict]
     scientific_report: str
+    report_feedback: str          #
+    report_verdict: bool          #
+    report_revision_counter: int  #
+    
 
 def data_agent(state: ResearchState) -> dict:
     #conversation history, we will add to this as tools are called to LLM gets a history of messages
@@ -460,6 +464,11 @@ The model selected as best, with its reasoning:
 """
     else:
         ml_section_text = "No predictive modeling results are available."
+    
+    if state["report_feedback"] and not state["report_verdict"]:#report feedback if it exists, we give into prompt
+        error_note = f"\nYour previous report was not approved by the reviewer, and the reason was: {state['report_feedback']}\nWrite the report again, making sure to fix this specific issue."
+    else:
+        error_note = ""
 
     prompt = f"""You are writing the Methods, Results, and Discussion sections of a scientific
 report, based on a statistical analysis of a health survey dataset, plus a separate predictive
@@ -506,6 +515,7 @@ and note the models' recall for the diabetic class specifically.
 
 Do not use causal language anywhere (no "causes", "leads to", "results in"). Write in a formal
 academic tone.
+{error_note}
 """
     response = client.chat.completions.create(
         model=model_name,
@@ -518,7 +528,86 @@ academic tone.
     new_log_entry = {"agent": "report_agent", "action": "Generated the full report, combining statistical testing and predictive modeling results."}
     updated_log = state["decision_log"] + [new_log_entry]
 
-    return {"scientific_report": response_text, "decision_log": updated_log}
+    return {"scientific_report": response_text, "decision_log": updated_log, "report_revision_counter": state["report_revision_counter"] + 1}
+
+def report_reviewer_agent(state: ResearchState) -> dict:
+    report_text = state["scientific_report"]
+    ml_data = load_ml_results()
+
+    if ml_data:
+        ml_ground_truth = f"Models actually trained: {list(ml_data['trained'].keys())}\nFull training results: {ml_data['trained']}\nSubmitted best-model summary: {ml_data['report']}"
+    else:
+        ml_ground_truth = "No predictive modeling results were available when the report was written."
+
+    prompt = f"""You are reviewing a scientific report for internal accuracy, not to re-run any
+statistics yourself.
+
+Here is the ground-truth data the report should be based on:
+Statistical tests used (feature = test): {state['method_choice']}
+Raw statistical results (feature: statistic and p-value): {state['calculated_data']}
+Reviewed interpretation: {state['interpretation']}
+Predictive modeling ground truth:
+{ml_ground_truth}
+
+Here is the report text to check:
+{report_text}
+
+Check specifically for:
+- Any feature described with a different test name than the one listed above (e.g. calling a
+  Mann-Whitney U test result a "chi-square statistic").
+- Any statistic, p-value, or other number in the report that does not match the raw results
+  given above.
+- Any claim about predictive modeling (model count, model names, accuracy, AUC, feature
+  importance) that isn't grounded in the predictive modeling ground truth given above.
+- Internal contradictions, where one part of the report states something that a different part
+  of the same report contradicts.
+
+Respond with ONLY a single JSON object and nothing else, no markdown code fences, no text
+before or after it. The object must have exactly these two keys:
+- "verdict": a boolean. true if the report is accurate and internally consistent, false if not.
+- "reason": a string explaining why, citing the specific mismatch if verdict is false.
+
+Example of the exact shape required (do not copy the content, only the structure):
+{{"verdict": false, "reason": "The report describes BMI as tested with a chi-square test, but method_choice lists BMI as Mann-Whitney U test."}}
+"""
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=1500,
+    )
+
+    response_text = response.choices[0].message.content
+
+    if response_text:
+        try:
+            json_reformat = json.loads(response_text)
+        except Exception as e:
+            json_reformat = {"verdict": False, "reason": f"Could not parse report reviewer response as JSON: {e}"}
+    else:
+        json_reformat = {"verdict": False, "reason": "Report reviewer agent returned no content to parse."}
+
+    report_verdict = bool(json_reformat["verdict"])
+
+    revision_counter = state["report_revision_counter"]
+    if not report_verdict and revision_counter + 1 == 3:
+        failed_log = "report revision counter hit its limit, despite having a false verdict we will still proceed."
+    else:
+        failed_log = ""
+
+    new_log_entry = {"agent": "report_reviewer_agent", "action": f"Deciding if the report was accurate or not, this time the verdict was {report_verdict} and reasoning was: {json_reformat['reason']}. {failed_log}"}
+    updated_log = state["decision_log"] + [new_log_entry]
+
+    return {"report_feedback": response_text, "report_verdict": report_verdict, "decision_log": updated_log}
+
+
+def route_after_report_review(state: ResearchState) -> str:
+    if state["report_revision_counter"] < 3:
+        if state["report_verdict"]:
+            return "approved"
+        else:
+            return "needs_revision"
+    else:
+        return "approved"
 
 #create a mini graph using LangGraph
 builder = StateGraph(ResearchState) #we tie it to our state schema
@@ -530,6 +619,7 @@ builder.add_node("modelling_agent", modelling_agent)
 builder.add_node("interpretation_agent", interpretation_agent)
 builder.add_node("reviewer_agent", reviewer_agent)
 builder.add_node("report_agent", report_agent)
+builder.add_node("report_reviewer_agent", report_reviewer_agent)
 
 #wire the steps
 builder.add_edge(START, "data_agent")          
@@ -557,7 +647,15 @@ builder.add_conditional_edges(
     },
 )
 
-builder.add_edge("report_agent", END)
+builder.add_edge("report_agent", "report_reviewer_agent")
+
+builder.add_conditional_edges(
+    "report_reviewer_agent", route_after_report_review,
+    {
+        "approved": END,
+        "needs_revision": "report_agent"
+    },
+)
 
 #compile to something runnable
 graph = builder.compile()
@@ -575,6 +673,9 @@ result = graph.invoke({
     "modelling_counter": 0,
     "decision_log": [],
     "scientific_report": "",
+    "report_feedback": "",        
+    "report_verdict": False,      
+    "report_revision_counter": 0, 
 })
 
 #print("Interpretation: ", result["interpretation"])
