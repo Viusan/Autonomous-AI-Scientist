@@ -75,11 +75,11 @@ def data_agent(state: ResearchState) -> dict:
                     requested_tool_name = tool_call["name"].split("<|")[0].strip()
                     matching_tool = next((t for t in tools if t.name == requested_tool_name), None)
 
-                    print(f"[data_agent] loop {loop_count}: model called '{requested_tool_name}' with args {tool_call['args']}")   #for debug remove later
+                    print(f"[data_agent] loop {loop_count}: model called '{requested_tool_name}' with args {tool_call['args']}")   #for debug remove later, might actually keep or move to a logging part
 
-                    if matching_tool is None:   # NEW
-                        print(f"[data_agent] WARNING: no tool named '{requested_tool_name}' exists, skipping")   # NEW
-                        continue   # NEW
+                    if matching_tool is None:   #more debugging
+                        print(f"[data_agent] WARNING: no tool named '{requested_tool_name}' exists, skipping")  
+                        continue   
 
                     raw_result = await matching_tool.ainvoke(tool_call["args"])
 
@@ -297,7 +297,7 @@ def route_after_modelling(state: ResearchState) -> str:
     has_error = any("error" in result for result in calculated_data.values())
 
     #if one of the methods returned as a error we just run the modelling agent again
-    #idk maybe we can make this more effective by only re-running the method that got the error
+    #maybe i can make this more effective by only re-running the method that got the error
     #cause now we re-running the whole method list, maybe waste of tokens?
     if not has_error:
         return "approved"
