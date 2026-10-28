@@ -48,6 +48,11 @@ class ResearchState(TypedDict):
     revision_counter: int
     modelling_counter: int
     decision_log: list[dict]
+    scientific_report: str
+    report_feedback: str          #
+    report_verdict: bool          #
+    report_revision_counter: int  #
+    
 
 def data_agent(state: ResearchState) -> dict:
     #conversation history, we will add to this as tools are called to LLM gets a history of messages
@@ -59,6 +64,8 @@ def data_agent(state: ResearchState) -> dict:
             model_with_tools = model.bind_tools(tools)
 
             response = await model_with_tools.ainvoke(messages)
+            print(f"[data_agent] first response, tool_calls = {response.tool_calls}")   #FOR DEBUG REMOVE LATER
+
             final_columns = None
             #had issue of being stuck while running program, seeing if this fixes
             loop_count = 0
@@ -71,6 +78,13 @@ def data_agent(state: ResearchState) -> dict:
                 for tool_call in response.tool_calls:
                     requested_tool_name = tool_call["name"].split("<|")[0].strip()
                     matching_tool = next((t for t in tools if t.name == requested_tool_name), None)
+
+                    print(f"[data_agent] loop {loop_count}: model called '{requested_tool_name}' with args {tool_call['args']}")   #for debug remove later, might actually keep or move to a logging part
+
+                    if matching_tool is None:   #more debugging
+                        print(f"[data_agent] WARNING: no tool named '{requested_tool_name}' exists, skipping")  
+                        continue   
+
                     raw_result = await matching_tool.ainvoke(tool_call["args"])
 
                     if isinstance(raw_result, list):
@@ -168,7 +182,8 @@ METHOD: HighBP = Chi-square test
                 if len(parts) == 2:
                     feature = parts[0].strip(" *")
                     method = parts[1].strip(" *")
-                    method_choice[feature] = method
+                    if feature != "Diabetes_binary":
+                        method_choice[feature] = method
 
     new_log_entry = {"agent": "methods_agent", "action": f"agent decided what method is best to use for calculating the statistics, and the decision it made: {response_text}"}
     updated_log = state["decision_log"] + [new_log_entry]
@@ -210,13 +225,30 @@ def modelling_agent(state: ResearchState) -> dict:
     from anywhere else.
 
     Requirements:
-    - Use only these libraries: scipy.stats, numpy, pandas. Do not import anything else, and do
-      not attempt any file access, network access, or database connection — work only with the
-      `given_data` variable already provided to you.
+    - Use only these libraries: scipy.stats, numpy, pandas, and statsmodels (for any test not
+      available in scipy, such as a trend test). Do not import anything else, and do not attempt
+      any file access, network access, or database connection — work only with the `given_data`
+      variable already provided to you.
     - Only use the `{feature}` and `Diabetes_binary` columns from `given_data` for this test.
-    - Run the test named above and print the result in exactly this format, with no other
-      output:
+    - Run the test named above and print the result on its own line, in exactly this format:
       RESULT: statistic=<value>, p_value=<value>
+    - Also print a second line showing the direction of the relationship, so it can be
+      reported alongside the test result. This line must describe what the numbers mean in
+      plain words, not just a bare dictionary, so it can be understood correctly without
+      needing to see this code:
+      - If the test is a Chi-square test: compute the proportion of Diabetes_binary==1 within
+        each unique value of `{feature}`, and print it as:
+        GROUP_SUMMARY: proportion with diabetes for each value of {feature}: <your result here>
+      - If the test is a Mann-Whitney U test: compute the median of `{feature}` separately for
+        Diabetes_binary==0 and Diabetes_binary==1, and print it as:
+        GROUP_SUMMARY: median {feature} for Diabetes_binary=0 group: <value>; median {feature}
+        for Diabetes_binary=1 group: <value>
+      - For any other test (e.g. an independent-samples t-test, ANOVA, or anything else not
+        listed above): choose whichever group summary best matches what the test is comparing
+        (for example, the mean of `{feature}` for each Diabetes_binary group, if the test
+        compares means), and print it in the same clearly labeled style:
+        GROUP_SUMMARY: <a clearly labeled description of the group difference>
+      Always print a GROUP_SUMMARY line, no matter which test was used above — never skip it.
     - The code must run standalone from top to bottom with no undefined variables, other than
       `given_data` itself.
     """
@@ -229,16 +261,31 @@ def modelling_agent(state: ResearchState) -> dict:
 
             response_text = response.choices[0].message.content
             sandbox_result = run_sandbox(response_text, given_data)
-
+            
             if sandbox_result["success"]:
                 text = sandbox_result["stdout"]
-                try:
-                    parts = text.split(",")
-                    statistic_value = parts[0].split("=")
-                    p_value = parts[1].split("=")
-                    calculated = {"statistic": float(statistic_value[1]), "p_value": float(p_value[1])}
-                except Exception as e:
-                    calculated = {"error": f"Could not parse output '{text}': {e}"}
+                result_line = None
+                summary_line = None
+            
+                for line in text.split("\n"):
+                    if line.startswith("RESULT:"):
+                        result_line = line
+                    if line.startswith("GROUP_SUMMARY:"):
+                        summary_line = line
+            
+                if result_line:
+                    try:
+                        rest = result_line.split("RESULT:", 1)[1]
+                        parts = rest.split(",")
+                        statistic_value = parts[0].split("=")
+                        p_value = parts[1].split("=")
+                        calculated = {"statistic": float(statistic_value[1]), "p_value": float(p_value[1])}
+                        if summary_line:
+                            calculated["group_summary"] = summary_line.split("GROUP_SUMMARY:", 1)[1].strip()
+                    except Exception as e:
+                        calculated = {"error": f"Could not parse output '{text}': {e}"}
+                else:
+                    calculated = {"error": f"No RESULT line found in output '{text}'"}
             else:
                 calculated = {"error": sandbox_result["error"]}
 
@@ -254,7 +301,7 @@ def route_after_modelling(state: ResearchState) -> str:
     has_error = any("error" in result for result in calculated_data.values())
 
     #if one of the methods returned as a error we just run the modelling agent again
-    #idk maybe we can make this more effective by only re-running the method that got the error
+    #maybe i can make this more effective by only re-running the method that got the error
     #cause now we re-running the whole method list, maybe waste of tokens?
     if not has_error:
         return "approved"
@@ -267,11 +314,13 @@ def interpretation_agent(state: ResearchState) -> dict:
     calculated= state["calculated_data"]#read what modelling_agent produced
     result_list = []
 
-    for feature, result in calculated.items():#just checking through which methods failed and which didnt
+    for feature, result in calculated.items():
         if "error" in result:
             line = f"- {feature}: test failed with error: {result['error']}"
         else:
             line = f"- {feature}: statistic={result['statistic']}, p_value={result['p_value']}"
+            if "group_summary" in result:
+                line = line + f", group summary: {result['group_summary']}"
         result_list.append(line)
     
     results_description = "\n".join(result_list)#we turn the result list from a list to a string
@@ -345,7 +394,14 @@ Example of the exact shape required (do not copy the content it only serves as a
     )
 
     response_text = response.choices[0].message.content
-    json_reformat = json.loads(response_text)
+
+    if response_text:
+        try:
+            json_reformat = json.loads(response_text)
+        except Exception as e:
+            json_reformat = {"verdict": False, "reason": f"Could not parse reviewer response as JSON: {e}"}
+    else:
+        json_reformat = {"verdict": False, "reason": "Reviewer agent returned no content to parse."}
 
     if json_reformat["verdict"]:
         reviewer_verdict = True
@@ -373,6 +429,207 @@ def route_after_review(state: ResearchState) -> str:
     else:
         return "approved"
 
+import glob
+
+def load_ml_results():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    log_files = glob.glob(os.path.join(script_dir, "Maskinlaeringsmodeller", "logs", "*.json"))
+    if not log_files:
+        return None
+
+    log_files_sorted = sorted(log_files, key=os.path.getmtime, reverse=True)
+
+    for log_file in log_files_sorted:
+        with open(log_file, "r") as f:
+            ml_data = json.load(f)
+        if ml_data.get("check", {}).get("report_submitted"):
+            return ml_data
+
+    return None
+
+
+def report_agent(state: ResearchState) -> dict:
+    ml_data = load_ml_results()
+    print("DEBUG ml_data:", ml_data)
+
+    if ml_data:
+        ml_section_text = f"""
+A separate predictive modeling component also tested several machine learning classifiers
+on the same dataset. Results per model tried, including each model's feature importance
+where available:
+{ml_data['trained']}
+
+The model selected as best, with its reasoning:
+{ml_data['report']}
+"""
+    else:
+        ml_section_text = "No predictive modeling results are available."
+    
+    if state["report_feedback"] and not state["report_verdict"]:#report feedback if it exists, we give into prompt
+        error_note = f"\nYour previous report was not approved by the reviewer, and the reason was: {state['report_feedback']}\nWrite the report again, making sure to fix this specific issue."
+    else:
+        error_note = ""
+
+    prompt = f"""You are writing the Methods, Results, and Discussion sections of a scientific
+report, based on a statistical analysis of a health survey dataset, plus a separate predictive
+modeling component.
+
+Features analyzed (statistical testing): {state['chosen_columns']}
+
+Statistical tests used (feature = test):
+{state['method_choice']}
+
+Raw statistical results (feature: statistic and p-value):
+{state['calculated_data']}
+
+Reviewed interpretation of these results:
+{state['interpretation']}
+
+Predictive modeling results:
+{ml_section_text}
+
+Write this as a short scientific report with these parts, in this order:
+
+Methods: Briefly describe both components - that each feature was statistically tested
+individually against diabetes status, and that several machine learning classifiers were
+separately trained and compared to predict diabetes status directly.
+
+Results: Report the statistical findings for each feature, referencing the actual statistic
+and p-value. Then report the machine learning results, listing each model tried with its
+accuracy and AUC, and which model performed best. For the best-performing model, also report
+its top few features by feature_importance, if that field is available for it.
+
+Discussion: Based only on the reviewed interpretation above, discuss what each statistical
+result suggests about a possible association with diabetes status. Then discuss what the
+predictive modeling results suggest about how well diabetes can be predicted overall, and
+whether the features the best model relied on most (per its feature_importance) line up with
+the features found statistically significant above. Do not introduce any claim that isn't
+already stated in the reviewed interpretation or the predictive modeling results provided
+above.
+
+Limitations: State that this data is observational and cross-sectional, so these are
+associations only, not causal relationships. Also state clearly that the predictive models
+were trained on the raw, imbalanced dataset without any class-imbalance handling (such as
+oversampling), so accuracy alone may be misleading relative to the majority-class baseline,
+and note the models' recall for the diabetic class specifically.
+
+Do not use causal language anywhere (no "causes", "leads to", "results in"). Write in a formal
+academic tone.
+{error_note}
+"""
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=2500,
+    )
+
+    response_text = response.choices[0].message.content
+
+    new_log_entry = {"agent": "report_agent", "action": "Generated the full report, combining statistical testing and predictive modeling results."}
+    updated_log = state["decision_log"] + [new_log_entry]
+
+    return {"scientific_report": response_text, "decision_log": updated_log, "report_revision_counter": state["report_revision_counter"] + 1}
+
+def report_reviewer_agent(state: ResearchState) -> dict:
+    report_text = state["scientific_report"]
+    ml_data = load_ml_results()
+
+    if ml_data:
+        #summary was too bix for the context window so we are dropping duplicate and uncesecary stuff
+        model_summaries = []
+        for trained_model_name, result in ml_data["trained"].items():
+            model_summaries.append(f"{trained_model_name}: accuracy={result['accuracy']}, auc={result['auc']}")
+
+        best_model_name = ml_data["report"].get("best_model")
+        best_model_result = ml_data["trained"].get(best_model_name, {})
+        top_features = None
+        if best_model_result.get("feature_importance"):
+            top_features = sorted(
+                best_model_result["feature_importance"].items(),
+                key=lambda x: -abs(x[1])
+            )[:5]
+
+        ml_ground_truth = f"""Models actually trained: {list(ml_data['trained'].keys())}
+Accuracy/AUC per model: {'; '.join(model_summaries)}
+Best model submitted: {ml_data['report']}
+Best model's top 5 features by importance: {top_features}"""
+    else:
+        ml_ground_truth = "No predictive modeling results were available when the report was written."
+
+    prompt = f"""You are reviewing a scientific report for internal accuracy, not to re-run any
+statistics yourself.
+
+Here is the ground-truth data the report should be based on:
+Statistical tests used (feature = test): {state['method_choice']}
+Raw statistical results (feature: statistic and p-value): {state['calculated_data']}
+Reviewed interpretation: {state['interpretation']}
+Predictive modeling ground truth:
+{ml_ground_truth}
+
+Here is the report text to check:
+{report_text}
+
+Check specifically for:
+- Any feature described with a different test name than the one listed above (e.g. calling a
+  Mann-Whitney U test result a "chi-square statistic").
+- Any statistic, p-value, or other number in the report that does not match the raw results
+  given above.
+- Any claim about predictive modeling (model count, model names, accuracy, AUC, feature
+  importance) that isn't grounded in the predictive modeling ground truth given above.
+- Internal contradictions, where one part of the report states something that a different part
+  of the same report contradicts.
+
+Respond with ONLY a single JSON object and nothing else, no markdown code fences, no text
+before or after it. The object must have exactly these two keys:
+- "verdict": a boolean. true if the report is accurate and internally consistent, false if not.
+- "reason": a string explaining why, citing the specific mismatch if verdict is false.
+
+Example of the exact shape required (do not copy the content, only the structure):
+{{"verdict": false, "reason": "The report describes BMI as tested with a chi-square test, but method_choice lists BMI as Mann-Whitney U test."}}
+"""
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[{"role": "user", "content": prompt}],
+        max_tokens=5500,
+    )
+
+    print(f"[report_reviewer_agent] prompt length (chars) = {len(prompt)}")
+    print(f"[report_reviewer_agent] finish_reason = {response.choices[0].finish_reason}")
+    print(f"[report_reviewer_agent] raw content = {repr(response.choices[0].message.content)}")
+
+    response_text = response.choices[0].message.content
+
+    if response_text:
+        try:
+            json_reformat = json.loads(response_text)
+        except Exception as e:
+            json_reformat = {"verdict": False, "reason": f"Could not parse report reviewer response as JSON: {e}"}
+    else:
+        json_reformat = {"verdict": False, "reason": "Report reviewer agent returned no content to parse."}
+
+    report_verdict = bool(json_reformat["verdict"])
+
+    revision_counter = state["report_revision_counter"]
+    if not report_verdict and revision_counter + 1 == 3:
+        failed_log = "report revision counter hit its limit, despite having a false verdict we will still proceed."
+    else:
+        failed_log = ""
+
+    new_log_entry = {"agent": "report_reviewer_agent", "action": f"Deciding if the report was accurate or not, this time the verdict was {report_verdict} and reasoning was: {json_reformat['reason']}. {failed_log}"}
+    updated_log = state["decision_log"] + [new_log_entry]
+
+    return {"report_feedback": response_text, "report_verdict": report_verdict, "decision_log": updated_log}
+
+
+def route_after_report_review(state: ResearchState) -> str:
+    if state["report_revision_counter"] < 3:
+        if state["report_verdict"]:
+            return "approved"
+        else:
+            return "needs_revision"
+    else:
+        return "approved"
+
 #create a mini graph using LangGraph
 builder = StateGraph(ResearchState) #we tie it to our state schema
 
@@ -382,6 +639,8 @@ builder.add_node("methods_agent", methods_agent)
 builder.add_node("modelling_agent", modelling_agent)
 builder.add_node("interpretation_agent", interpretation_agent)
 builder.add_node("reviewer_agent", reviewer_agent)
+builder.add_node("report_agent", report_agent)
+builder.add_node("report_reviewer_agent", report_reviewer_agent)
 
 #wire the steps
 builder.add_edge(START, "data_agent")          
@@ -404,8 +663,18 @@ builder.add_conditional_edges(
     "reviewer_agent", route_after_review,
     {
         #if route_after_review function returns approved we end, or we loop back into interpretation
-        "approved": END,
+        "approved": "report_agent",
         "needs_revision": "interpretation_agent"
+    },
+)
+
+builder.add_edge("report_agent", "report_reviewer_agent")
+
+builder.add_conditional_edges(
+    "report_reviewer_agent", route_after_report_review,
+    {
+        "approved": END,
+        "needs_revision": "report_agent"
     },
 )
 
@@ -424,6 +693,10 @@ result = graph.invoke({
     "revision_counter": 0,
     "modelling_counter": 0,
     "decision_log": [],
+    "scientific_report": "",
+    "report_feedback": "",        
+    "report_verdict": False,      
+    "report_revision_counter": 0, 
 })
 
 #print("Interpretation: ", result["interpretation"])
@@ -431,3 +704,5 @@ result = graph.invoke({
 #print("Given data: ", result["given_data"])
 print("Decision log: ", result["decision_log"])
 #print("Calculated data: ", result["calculated_data"])
+print("----------------------------------------------- THIS IS THE REPORT -----------------------------------------------")
+print("Scientific report: ", result["scientific_report"])

@@ -105,6 +105,16 @@ def tool_train_model(table, model, params=None):
     else:
         score = None
 
+    # Hent feature importance der modellen støtter det
+    faktisk_modell = modell[-1] if m.get("skala") else modell  # siste steg i pipeline, hvis scaling ble brukt
+    feature_importance = None
+    if hasattr(faktisk_modell, "feature_importances_"):
+        verdier = faktisk_modell.feature_importances_
+        feature_importance = dict(sorted(zip(X_train.columns, verdier.tolist()), key=lambda x: -x[1]))
+    elif hasattr(faktisk_modell, "coef_"):
+        verdier = faktisk_modell.coef_[0]
+        feature_importance = dict(sorted(zip(X_train.columns, verdier.tolist()), key=lambda x: -abs(x[1])))
+
     resultat = {
         "model": model, "table": table, "params": innstillinger,
         "trained_on_rows": len(X_fit), "test_rows": len(X_test),
@@ -115,5 +125,6 @@ def tool_train_model(table, model, params=None):
         "auc": round(float(roc_auc_score(y_test, score)), 4) if score is not None else None,
         "baseline_accuracy": info["baseline_accuracy"], "rows_dropped_missing": info["rows_dropped_missing"],
         "seconds": round(time.time() - start, 1),
+        "feature_importance": feature_importance,
     }
     return resultat
