@@ -104,6 +104,20 @@ def data_agent(state: ResearchState) -> dict:
                     break
 
                 response = await model_with_tools.ainvoke(messages)
+
+            if final_columns is None:
+                #sometimes agent decides to stop before calling the final tool, so this forces it to do it
+                print("[data_agent] model stopped without calling finalized_selection, nudging it to finish")
+                messages.append(response)
+                messages.append(HumanMessage(content="You explored the data but did not call finalized_selection. Please call finalized_selection now with the columns you have decided to use."))
+                response = await model_with_tools.ainvoke(messages)
+                if response.tool_calls:
+                    for tool_call in response.tool_calls:
+                        requested_tool_name = tool_call["name"].split("<|")[0].strip()
+                        if requested_tool_name == "finalized_selection":
+                            final_columns = tool_call["args"]["chosen_columns"]
+
+            print(f"[data_agent] loop ended, final_columns = {final_columns}")
             return final_columns
 
     final_columns = asyncio.run(explore_and_select())
