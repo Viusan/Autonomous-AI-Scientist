@@ -60,7 +60,7 @@ async def kjor_agent(tabell, maks_steg=25):
     mappe = os.path.dirname(os.path.abspath(__file__))
     server = StdioServerParameters(
         command=sys.executable, args=[os.path.join(mappe, "ml_server.py")],
-        env={**os.environ, "ML_DB": os.path.abspath("diabetes.db"), "PYTHONPATH": mappe})
+        env={**os.environ, "ML_DB": os.path.join(mappe, "diabetes.db"), "PYTHONPATH": mappe})
 
     rapport, trent, log = {}, {}, []
 
@@ -159,8 +159,9 @@ if __name__ == "__main__":
     print("\n=== KONTROLL ===")
     print(json.dumps(sjekk, indent=2))
 
-    os.makedirs("logs", exist_ok=True)
-    fil = os.path.join("logs", f"{tabell}_{int(time.time())}.json")
+    mappe = os.path.dirname(os.path.abspath(__file__))
+    os.makedirs(os.path.join(mappe, "logs"), exist_ok=True)
+    fil = os.path.join(mappe, "logs", f"{tabell}_{int(time.time())}.json")
     with open(fil, "w") as f:
         json.dump({"table": tabell, "report": rapport_ut, "check": sjekk, "trained": trent, "log": log},
                   f, indent=2, ensure_ascii=False, default=str)
