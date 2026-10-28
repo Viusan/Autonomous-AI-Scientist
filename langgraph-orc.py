@@ -535,7 +535,24 @@ def report_reviewer_agent(state: ResearchState) -> dict:
     ml_data = load_ml_results()
 
     if ml_data:
-        ml_ground_truth = f"Models actually trained: {list(ml_data['trained'].keys())}\nFull training results: {ml_data['trained']}\nSubmitted best-model summary: {ml_data['report']}"
+        #summary was too bix for the context window so we are dropping duplicate and uncesecary stuff
+        model_summaries = []
+        for trained_model_name, result in ml_data["trained"].items():
+            model_summaries.append(f"{trained_model_name}: accuracy={result['accuracy']}, auc={result['auc']}")
+
+        best_model_name = ml_data["report"].get("best_model")
+        best_model_result = ml_data["trained"].get(best_model_name, {})
+        top_features = None
+        if best_model_result.get("feature_importance"):
+            top_features = sorted(
+                best_model_result["feature_importance"].items(),
+                key=lambda x: -abs(x[1])
+            )[:5]
+
+        ml_ground_truth = f"""Models actually trained: {list(ml_data['trained'].keys())}
+Accuracy/AUC per model: {'; '.join(model_summaries)}
+Best model submitted: {ml_data['report']}
+Best model's top 5 features by importance: {top_features}"""
     else:
         ml_ground_truth = "No predictive modeling results were available when the report was written."
 
@@ -573,8 +590,12 @@ Example of the exact shape required (do not copy the content, only the structure
     response = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=1500,
+        max_tokens=5500,
     )
+
+    print(f"[report_reviewer_agent] prompt length (chars) = {len(prompt)}")
+    print(f"[report_reviewer_agent] finish_reason = {response.choices[0].finish_reason}")
+    print(f"[report_reviewer_agent] raw content = {repr(response.choices[0].message.content)}")
 
     response_text = response.choices[0].message.content
 
