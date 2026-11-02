@@ -1,33 +1,51 @@
 services:
   agent:
     build: .
-    env_file: .env
+    env_file:
+      - .env
     environment:
-      - HTTPS_PROXY=http://proxy:3128
-      - HTTP_PROXY=http://proxy:3128
-      - TABLE_NAME=diabetes_binary
+      HTTPS_PROXY: http://proxy:3128
+      HTTP_PROXY: http://proxy:3128
+      https_proxy: http://proxy:3128
+      http_proxy: http://proxy:3128
+      NO_PROXY: localhost,127.0.0.1
+      no_proxy: localhost,127.0.0.1
+      TABLE_NAME: diabetes_binary
+
     volumes:
       - ./diabetes.db:/app/diabetes.db:ro
+      - ./output:/app/output
+
     depends_on:
       proxy:
         condition: service_healthy
-    networks: [llmnet]
+
+    networks:
+      - llmnet
 
   proxy:
     image: ubuntu/squid
+
     volumes:
       - ./squid.conf:/etc/squid/squid.conf:ro
       - squid-logs:/var/log/squid
+
     healthcheck:
       test: ["CMD", "squid", "-k", "check"]
       interval: 5s
+      timeout: 5s
       retries: 5
-    networks: [llmnet, external]
+
+    networks:
+      - llmnet
+      - external
 
 networks:
   llmnet:
     internal: true
+
   external:
 
 volumes:
   squid-logs:
+  graph-file:
