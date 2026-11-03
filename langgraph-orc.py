@@ -695,7 +695,7 @@ builder.add_conditional_edges(
 #compile to something runnable
 graph = builder.compile()
 
-graph.get_graph().draw_mermaid_png(output_file_path="graph.png") #create a graph to vizualise how the nodes interact with each other
+graph.get_graph().draw_mermaid_png(output_file_path="/app/output/graph.png") #create a graph to vizualise how the nodes interact with each other
 
 result = graph.invoke({
     "chosen_columns": [],
