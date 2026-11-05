@@ -1,7 +1,5 @@
 import os
 import sqlite3
-import io
-import contextlib
 import json
 import pandas as pd
 import asyncio
@@ -10,12 +8,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 from openai import OpenAI
 from typing import TypedDict
+from sandbox import run_sandbox
 from mcp_helpers import fetch_dataframe
 from langchain.mcp import MCPAdapter
 from langgraph.graph import StateGraph, START, END
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import ToolMessage
+from log_system import init_log, log_event
 
 load_dotenv()
 
@@ -79,14 +79,16 @@ def data_agent(state: ResearchState) -> dict:
                     requested_tool_name = tool_call["name"].split("<|")[0].strip()
                     matching_tool = next((t for t in tools if t.name == requested_tool_name), None)
 
-                    print(f"[data_agent] loop {loop_count}: model called '{requested_tool_name}' with args {tool_call['args']}")   #for debug remove later, might actually keep or move to a logging part
-
+                    print(f"[data_agent] loop {loop_count}: model called '{requested_tool_name}' with args {tool_call['args']}")
+                    log_event("data_agent", "tool_call", tool=requested_tool_name, args=tool_call["args"], loop=loop_count)
+                    
                     if matching_tool is None:   #more debugging
                         print(f"[data_agent] WARNING: no tool named '{requested_tool_name}' exists, skipping")  
                         continue   
 
                     raw_result = await matching_tool.ainvoke(tool_call["args"])
-
+                    log_event("data_agent", "tool_result", tool=requested_tool_name, result=raw_result)
+                    
                     if isinstance(raw_result, list):
                         result_text = "".join(block.get("text", "") for block in raw_result if isinstance(block, dict))
                     else:
@@ -203,17 +205,6 @@ METHOD: HighBP = Chi-square test
     updated_log = state["decision_log"] + [new_log_entry]
 
     return {"method_choice": method_choice, "decision_log": updated_log}
-
-#this wont be in final code, this should be in docker sandbox
-def run_sandbox(code: str, given_data) -> dict: #utility function
-    buffer = io.StringIO() #empty fake in-memory
-    try:
-        with contextlib.redirect_stdout(buffer): #whatever is printed inside here goes into the memory
-            exec(code, {"given_data": given_data})
-            captured_text = buffer.getvalue()   #pulls everything from buffer to string
-            return {"success": True, "stdout": captured_text, "error": None}
-    except Exception as e:
-        return {"success": False, "stdout": buffer.getvalue(), "error": str(e)}
 
 def modelling_agent(state: ResearchState) -> dict:
     method_choice = state["method_choice"]
@@ -429,6 +420,8 @@ Example of the exact shape required (do not copy the content it only serves as a
     else:
         failed_log =""
 
+    log_event("reviewer_agent", "review", verdict=reviewer_verdict, reason=json_reformat["reason"], revision=revision_counter)
+    
     new_log_entry = {"agent": "reviewer_agent", "action": f"Deciding if the interpretation was valid or not, this time the verdict was {reviewer_verdict} and reasoning was: {json_reformat['reason']}. {failed_log}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
@@ -479,8 +472,9 @@ The model selected as best, with its reasoning:
     else:
         ml_section_text = "No predictive modeling results are available."
     
-    if state["report_feedback"] and not state["report_verdict"]:#report feedback if it exists, we give into prompt
+    if state["report_feedback"] and not state["report_verdict"]:
         error_note = f"\nYour previous report was not approved by the reviewer, and the reason was: {state['report_feedback']}\nWrite the report again, making sure to fix this specific issue."
+        log_event("report_agent", "revision", counter=state["report_revision_counter"] + 1, feedback=state["report_feedback"])
     else:
         error_note = ""
 
@@ -696,6 +690,10 @@ builder.add_conditional_edges(
 graph = builder.compile()
 
 graph.get_graph().draw_mermaid_png(output_file_path="graph.png") #create a graph to vizualise how the nodes interact with each other
+
+log_path = init_log()
+print(f"Logging this run to {log_path}")
+
 
 result = graph.invoke({
     "chosen_columns": [],
