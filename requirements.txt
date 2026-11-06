@@ -1,4 +1,5 @@
 #LangChain og MCP
+fastapi
 langchain[mcp]>=1.4.0
 langchain-openai
 mcp>=2,<3

@@ -10,7 +10,7 @@ services:
       http_proxy: http://proxy:3128
       NO_PROXY: localhost,127.0.0.1
       no_proxy: localhost,127.0.0.1
-      TABLE_NAME: diabetes_binary
+      TABLE_NAME: diabetes_binary 
 
     volumes:
       - ./diabetes.db:/app/diabetes.db:ro
@@ -20,8 +20,35 @@ services:
       proxy:
         condition: service_healthy
 
+    read_only: true
+    mem_limit: 2g
+    cpus: 2.0
+    pids_limit: 128
+
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+
+    cap_drop:
+      - ALL
+
+    security_opt:
+      - no-new-privileges:true    
+
     networks:
       - llmnet
+
+  api-gateway:
+    image: alpine/socat
+    command:
+      - TCP-LISTEN:8000,fork,reuseaddr
+      - TCP:agent:8000
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      - agent
+    networks:
+      - llmnet
+      - apinet
 
   proxy:
     image: ubuntu/squid
@@ -45,6 +72,9 @@ networks:
     internal: true
 
   external:
+
+  apinet:
+    driver: bridge
 
 volumes:
   squid-logs:
