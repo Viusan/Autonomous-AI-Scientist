@@ -365,6 +365,12 @@ Dataset coding: Age is an ordinal age-category variable (1–13), not age in yea
 Report Age differences as differences in categories, never as years.
 Do not describe differences in medians as differences in means.
 Before describing any association, check the actual values in group_summary.
+For categorical variables, each numeric category code maps to its own
+specific value in group_summary. Verify this mapping before reporting
+any percentage or identifying the lowest or highest category.
+Never assign a value from one category to another category.
+If the prevalence is not monotonic across categories, do not describe
+it as a steady increase or decrease.
 Never reverse the direction of a difference between groups.
 If you mention a numerical difference, calculate it directly from the
 reported group values and express it in percentage points when appropriate.
