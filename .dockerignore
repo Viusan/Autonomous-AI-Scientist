@@ -1,6 +1,11 @@
 .env
-.env.elastic
 .git
 __pycache__
 graph.png
 diabetes.db
+.venv
+venv
+*.pyc
+*.pyo
+logs/
+catboost_info/
