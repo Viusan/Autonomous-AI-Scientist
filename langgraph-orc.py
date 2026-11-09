@@ -186,6 +186,7 @@ METHOD: HighBP = Chi-square test
     )
 
     response_text = response.choices[0].message.content
+    print(f"[interpretation_agent] interpretation = {response_text}", flush=True)
     method_choice = {}
 
     if response_text:
@@ -270,7 +271,7 @@ def modelling_agent(state: ResearchState) -> dict:
             response = client.chat.completions.create(
                 model=model_name,
                 messages=[{"role": "user", "content": prompt}],
-                max_tokens=1500,
+                max_tokens=5000,
             )
 
             response_text = response.choices[0].message.content
@@ -359,16 +360,33 @@ overstate any finding. This data is observational and cross-sectional, so descri
 relationship only as a statistical association, never as causation, do not use words like
 "causes", "leads to", or "results in". Answer briefly, covering the features together, in a
 maximum of 5 sentences.
+
+Dataset coding: Age is an ordinal age-category variable (1–13), not age in years.
+Report Age differences as differences in categories, never as years.
+Do not describe differences in medians as differences in means.
+Before describing any association, check the actual values in group_summary.
+Never reverse the direction of a difference between groups.
+If you mention a numerical difference, calculate it directly from the
+reported group values and express it in percentage points when appropriate.
+Do not invent or estimate numerical ranges that are not supported by the data.
+If the direction or magnitude cannot be determined from the provided results,
+state that it cannot be determined instead of guessing.
 {error_note}
 """
 
     response = client.chat.completions.create(
     model=model_name,
     messages=[{"role": "user", "content": prompt}],
-    max_tokens=1500,
+    max_tokens=5000,
     )
     
     response_text = response.choices[0].message.content
+    print(f"[interpretation_agent] interpretation = {response_text}", flush=True)
+    print(f"[interpretation_agent] finish_reason = {response.choices[0].finish_reason}, content_is_none = {response_text is None}", flush=True)
+    print(
+        f"[interpretation_agent] usage = {response.usage}",
+        flush=True
+    )
 
     new_log_entry = {"agent": "interpretation_agent", "action": f"interpreting the data that was given from data_agent, response was: {response_text}"}
     updated_log = state["decision_log"] + [new_log_entry]
@@ -404,7 +422,7 @@ Example of the exact shape required (do not copy the content it only serves as a
     response = client.chat.completions.create(
     model=model_name,
     messages=[{"role": "user", "content": prompt}],
-    max_tokens=1500,
+    max_tokens=5000,
     )
 
     response_text = response.choices[0].message.content
@@ -425,7 +443,7 @@ Example of the exact shape required (do not copy the content it only serves as a
     revision_counter = state["revision_counter"]
 
     if not reviewer_verdict and revision_counter+1 == 3:
-        failed_log = "revision counter hit its limit, despite having a false verdict we will still proceed."
+        failed_log = "Interpretation rejected after 3 attempts. Workflow will stop."
     else:
         failed_log =""
 
@@ -435,13 +453,16 @@ Example of the exact shape required (do not copy the content it only serves as a
     return {"reviewer_feedback": response_text, "reviewer_verdict": reviewer_verdict, "revision_counter": state["revision_counter"]+1, "decision_log": updated_log}
     
 def route_after_review(state: ResearchState) -> str:
-    if state["revision_counter"] < 3: #just so we dont create a infinite loop
-        if state["reviewer_verdict"]:
-            return "approved"
-        else:
-            return "needs_revision"
-    else:
+    if state["reviewer_verdict"]:
         return "approved"
+
+    if state["revision_counter"] < 3:
+        return "needs_revision"
+
+    raise ValueError(
+        "Statistical interpretation was rejected after 3 attempts. "
+        "Last reviewer feedback: " + str(state["reviewer_feedback"])
+    )
 
 import glob
 
@@ -496,6 +517,13 @@ Statistical tests used (feature = test):
 Raw statistical results (feature: statistic and p-value):
 {state['calculated_data']}
 
+Dataset coding: Sex = 0 means female; Sex = 1 means male.
+When interpreting Sex, use these labels exactly. Do not reverse them.
+Dataset coding: Age is an ordinal age-category variable (1–13), not age in years.
+Report Age values as category codes, never as years.
+A difference of two Age categories does not mean a difference of two years.
+Do not describe differences in medians as differences in means.
+
 Reviewed interpretation of these results:
 {state['interpretation']}
 
@@ -504,28 +532,34 @@ Predictive modeling results:
 
 Write this as a short scientific report with these parts, in this order:
 
-Methods: Briefly describe both components - that each feature was statistically tested
-individually against diabetes status, and that several machine learning classifiers were
-separately trained and compared to predict diabetes status directly.
+Methods: Describe the statistical tests performed for each feature against diabetes status.
+Describe predictive modeling only if predictive modeling results are provided above.
+If no predictive modeling results are available, explicitly state that predictive modeling
+results were unavailable and do not invent models or performance metrics.
+Unavailable predictive modeling results do not prove that modeling was not performed.
+Never claim that predictive models were not trained, generated, or conducted unless explicitly supported by the provided data.
 
 Results: Report the statistical findings for each feature, referencing the actual statistic
-and p-value. Then report the machine learning results, listing each model tried with its
-accuracy and AUC, and which model performed best. For the best-performing model, also report
-its top few features by feature_importance, if that field is available for it.
+and p-value. Only if predictive modeling results are available, report each model tried,
+its accuracy and AUC, and which model performed best. For the best-performing model,
+also report its top features by feature_importance, if available.
+If no predictive modeling results are available, do not invent any model results.
 
 Discussion: Based only on the reviewed interpretation above, discuss what each statistical
-result suggests about a possible association with diabetes status. Then discuss what the
-predictive modeling results suggest about how well diabetes can be predicted overall, and
-whether the features the best model relied on most (per its feature_importance) line up with
-the features found statistically significant above. Do not introduce any claim that isn't
-already stated in the reviewed interpretation or the predictive modeling results provided
-above.
+result suggests about a possible association with diabetes status.
+Only if predictive modeling results are available, discuss how well diabetes can be predicted
+and whether the best model's most important features align with the statistically significant
+features. If predictive modeling results are unavailable, do not discuss model performance.
+Do not introduce any claims that are not supported by the provided results or interpretation.
 
 Limitations: State that this data is observational and cross-sectional, so these are
-associations only, not causal relationships. Also state clearly that the predictive models
-were trained on the raw, imbalanced dataset without any class-imbalance handling (such as
-oversampling), so accuracy alone may be misleading relative to the majority-class baseline,
-and note the models' recall for the diabetic class specifically.
+associations only, not causal relationships.
+Only if predictive modeling results are available, discuss the limitations of training
+models on the raw, imbalanced dataset without class-imbalance handling, including why
+accuracy may be misleading relative to the majority-class baseline.
+Mention recall for the diabetic class only if that metric is provided in the results.
+If predictive modeling results are unavailable, state that predictive model performance
+could not be evaluated.
 
 Do not use causal language anywhere (no "causes", "leads to", "results in"). Write in a formal
 academic tone.
@@ -534,10 +568,13 @@ academic tone.
     response = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=2500,
+        max_tokens=5000,
     )
 
     response_text = response.choices[0].message.content
+
+    if not response_text or not response_text.strip():
+        raise ValueError("Report agent returned an empty scientific report")
 
     new_log_entry = {"agent": "report_agent", "action": "Generated the full report, combining statistical testing and predictive modeling results."}
     updated_log = state["decision_log"] + [new_log_entry]
@@ -622,10 +659,13 @@ Example of the exact shape required (do not copy the content, only the structure
         json_reformat = {"verdict": False, "reason": "Report reviewer agent returned no content to parse."}
 
     report_verdict = bool(json_reformat["verdict"])
+    if not report_text or not report_text.strip():
+        report_verdict = False
+        json_reformat["reason"] = "Scientific report is empty and cannot be approved."
 
     revision_counter = state["report_revision_counter"]
     if not report_verdict and revision_counter + 1 == 3:
-        failed_log = "report revision counter hit its limit, despite having a false verdict we will still proceed."
+        failed_log = "Scientific report rejected after 3 attempts. Workflow will stop."
     else:
         failed_log = ""
 
@@ -636,13 +676,16 @@ Example of the exact shape required (do not copy the content, only the structure
 
 
 def route_after_report_review(state: ResearchState) -> str:
-    if state["report_revision_counter"] < 3:
-        if state["report_verdict"]:
-            return "approved"
-        else:
-            return "needs_revision"
-    else:
+    if state["report_verdict"]:
         return "approved"
+
+    if state["report_revision_counter"] < 3:
+        return "needs_revision"
+
+    raise ValueError(
+        "Scientific report was rejected after 3 attempts. "
+        "Last reviewer feedback: " + str(state["report_feedback"])
+    )
 
 #create a mini graph using LangGraph
 builder = StateGraph(ResearchState) #we tie it to our state schema
@@ -695,28 +738,31 @@ builder.add_conditional_edges(
 #compile to something runnable
 graph = builder.compile()
 
-graph.get_graph().draw_mermaid_png(output_file_path="/app/output/graph.png") #create a graph to vizualise how the nodes interact with each other
 
-result = graph.invoke({
-    "chosen_columns": [],
-    "method_choice": {},
-    "calculated_data": {},
-    "interpretation": "",
-    "reviewer_feedback": "",
-    "reviewer_verdict": False,
-    "revision_counter": 0,
-    "modelling_counter": 0,
-    "decision_log": [],
-    "scientific_report": "",
-    "report_feedback": "",        
-    "report_verdict": False,      
-    "report_revision_counter": 0, 
-})
+def run_workflow():
+    # Generate graph visualization when the workflow is triggered
+    graph.get_graph().draw_mermaid_png(
+        output_file_path="/app/output/graph.png"
+    )
 
-#print("Interpretation: ", result["interpretation"])
-#print("Method choice: ", result["method_choice"])
-#print("Given data: ", result["given_data"])
-print("Decision log: ", result["decision_log"])
-#print("Calculated data: ", result["calculated_data"])
-print("----------------------------------------------- THIS IS THE REPORT -----------------------------------------------")
-print("Scientific report: ", result["scientific_report"])
+    result = graph.invoke({
+        "chosen_columns": [],
+        "method_choice": {},
+        "calculated_data": {},
+        "interpretation": "",
+        "reviewer_feedback": "",
+        "reviewer_verdict": False,
+        "revision_counter": 0,
+        "modelling_counter": 0,
+        "decision_log": [],
+        "scientific_report": "",
+        "report_feedback": "",
+        "report_verdict": False,
+        "report_revision_counter": 0,
+    })
+
+    print("Decision log: ", result["decision_log"])
+    print("----------------------------------------------- THIS IS THE REPORT -----------------------------------------------")
+    print("Scientific report: ", result["scientific_report"])
+
+    return result

@@ -13,14 +13,14 @@ RUN useradd --create-home agentuser
 
 COPY --chown=root:root . .
 
-# Application files should not be writable by the agent
+#Agent har ikke skriverettigheter på /app
 RUN chmod -R a-w /app
 
-# Create a dedicated writable directory
+#Lager en katalog agenten kan skrive på for output
 RUN mkdir -p /app/output \
     && chown agentuser:agentuser /app/output \
     && chmod 700 /app/output
 
 USER agentuser
 
-CMD ["python", "langgraph-orc.py"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
