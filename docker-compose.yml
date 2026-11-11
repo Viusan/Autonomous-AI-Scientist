@@ -15,6 +15,7 @@ services:
     volumes:
       - ./diabetes.db:/app/diabetes.db:ro
       - ./output:/app/output
+      - ./logs:/app/logs
 
     depends_on:
       proxy:
