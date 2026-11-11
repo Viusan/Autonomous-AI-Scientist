@@ -188,7 +188,6 @@ METHOD: HighBP = Chi-square test
     )
 
     response_text = response.choices[0].message.content
-    print(f"[interpretation_agent] interpretation = {response_text}", flush=True)
     method_choice = {}
 
     if response_text:
