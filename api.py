@@ -21,14 +21,35 @@ def health_check():
 def run_analysis():
     try:
         result = langgraph_orc.run_workflow()
+    except Exception as e:
+        #only real crashes give 500 now
+        raise HTTPException(status_code=500, detail=str(e))
 
+    if any("error" in r for r in result["calculated_data"].values()):
         return {
-            "status": "completed",
-            "scientific_report": result["scientific_report"]
+            "status": "modelling_failed",
+            "approved": False,
+            "calculated_data": result["calculated_data"],
         }
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+    if not result["reviewer_verdict"]:
+        return {
+            "status": "interpretation_rejected",
+            "approved": False,
+            "interpretation": result["interpretation"],
+            "reviewer_feedback": result["reviewer_feedback"],
+        }
+
+    if not result["report_verdict"]:
+        return {
+            "status": "report_rejected",
+            "approved": False,
+            "scientific_report": result["scientific_report"],
+            "report_feedback": result["report_feedback"],
+        }
+
+    return {
+        "status": "completed",
+        "approved": True,
+        "scientific_report": result["scientific_report"],
+    }
