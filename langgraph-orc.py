@@ -23,13 +23,16 @@ api_key = os.getenv("OSBOT_API_KEY")
 base_url = os.getenv("OSBOT_BASE_URL")
 model_name = os.getenv("LOCAL_MODEL")
 
-model = ChatOpenAI( #this is for the langchain openai object (so we gonna use this for the tools)
-    model=model_name,
-    api_key="dummy",
-    base_url=base_url,
-    max_tokens=5000,
-    default_headers={"x-api-key": api_key},
-)
+def make_model():
+    #we create a new model every run, because the async client gets tied to the event loop
+    #asyncio.run() closes the loop after each run, so a reused model would crash on the next /run
+    return ChatOpenAI(
+        model=model_name,
+        api_key="dummy",
+        base_url=base_url,
+        max_tokens=5000,
+        default_headers={"x-api-key": api_key},
+    )
 
 client = OpenAI(
     api_key="dummy",
@@ -49,9 +52,9 @@ class ResearchState(TypedDict):
     modelling_counter: int
     decision_log: list[dict]
     scientific_report: str
-    report_feedback: str          #
-    report_verdict: bool          #
-    report_revision_counter: int  #
+    report_feedback: str          
+    report_verdict: bool          
+    report_revision_counter: int  
     
 
 def data_agent(state: ResearchState) -> dict:
@@ -59,6 +62,7 @@ def data_agent(state: ResearchState) -> dict:
     messages = [HumanMessage(content="Find out which columns exist in the table, then fetch the data for what you percieve to be important factors that could cause diabetes, and decide when you are done.")]
 
     async def explore_and_select():
+        model = make_model()
         async with MCPAdapter(Path("diabetes-db-server.py")) as adapter:
             tools = await adapter.list_tools()
             model_with_tools = model.bind_tools(tools)
@@ -70,7 +74,7 @@ def data_agent(state: ResearchState) -> dict:
             #had issue of being stuck while running program, seeing if this fixes
             loop_count = 0
             max_loops = 10
-
+    
             while response.tool_calls:
                 loop_count = loop_count + 1
                 messages.append(response)
@@ -453,14 +457,9 @@ Example of the exact shape required (do not copy the content it only serves as a
 def route_after_review(state: ResearchState) -> str:
     if state["reviewer_verdict"]:
         return "approved"
-
     if state["revision_counter"] < 3:
         return "needs_revision"
-
-    raise ValueError(
-        "Statistical interpretation was rejected after max revisions. "
-        "Last reviewer feedback: " + str(state["reviewer_feedback"])
-    )
+    return "failed"
 
 import glob
 
@@ -677,14 +676,9 @@ Example of the exact shape required (do not copy the content, only the structure
 def route_after_report_review(state: ResearchState) -> str:
     if state["report_verdict"]:
         return "approved"
-
     if state["report_revision_counter"] < 3:
         return "needs_revision"
-
-    raise ValueError(
-        "Scientific report was rejected after max revisions. "
-        "Last reviewer feedback: " + str(state["report_feedback"])
-    )
+    return "failed"
 
 #create a mini graph using LangGraph
 builder = StateGraph(ResearchState) #we tie it to our state schema
@@ -720,7 +714,8 @@ builder.add_conditional_edges(
     {
         #if route_after_review function returns approved we end, or we loop back into interpretation
         "approved": "report_agent",
-        "needs_revision": "interpretation_agent"
+        "needs_revision": "interpretation_agent",
+        "failed": END
     },
 )
 
@@ -730,7 +725,8 @@ builder.add_conditional_edges(
     "report_reviewer_agent", route_after_report_review,
     {
         "approved": END,
-        "needs_revision": "report_agent"
+        "needs_revision": "report_agent",
+        "failed": END
     },
 )
 
