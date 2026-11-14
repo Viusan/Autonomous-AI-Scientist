@@ -3,6 +3,7 @@ import sqlite3
 import json
 import pandas as pd
 import asyncio
+import time
 
 from pathlib import Path
 from dotenv import load_dotenv
@@ -39,6 +40,18 @@ client = OpenAI(
     base_url=base_url,
     default_headers={"x-api-key": api_key},
 )
+
+def trace(agent, event, **details):
+    #one place for all step logging:
+    #prints a short readable line in the docker logs, and writes the full details to the jsonl run log
+    parts = []
+    for key, value in details.items():
+        text = str(value)
+        if len(text) > 400:
+            text = text[:400] + "..."
+        parts.append(f"{key}={text}")
+    print(f"[{agent}] {event}: " + ", ".join(parts), flush=True)
+    log_event(agent, event, **details)
 
 #this is stategraph, it's a data container (or shared memory) that gets passed around the agents.
 class ResearchState(TypedDict):
@@ -84,7 +97,7 @@ def data_agent(state: ResearchState) -> dict:
                     matching_tool = next((t for t in tools if t.name == requested_tool_name), None)
 
                     print(f"[data_agent] loop {loop_count}: model called '{requested_tool_name}' with args {tool_call['args']}")
-                    log_event("data_agent", "tool_call", tool=requested_tool_name, args=tool_call["args"], loop=loop_count)
+                    trace("data_agent", "tool_call", loop=loop_count, tool=requested_tool_name, args=tool_call["args"])
                     
                     if matching_tool is None:   #more debugging
                         print(f"[data_agent] WARNING: no tool named '{requested_tool_name}' exists, skipping")  
@@ -129,6 +142,8 @@ def data_agent(state: ResearchState) -> dict:
     final_columns = asyncio.run(explore_and_select())
     if final_columns is None: #safeguard incase we get nothing 
         final_columns = []
+
+    trace("data_agent", "final_columns", columns=final_columns)
 
     new_log_entry = {"agent": "data_agent", "action": f"agent gets the data it wants from diabetes.db, it chose: {final_columns}"}
     updated_log = state["decision_log"] + [new_log_entry] 
@@ -205,6 +220,7 @@ METHOD: HighBP = Chi-square test
                     if feature != "Diabetes_binary":
                         method_choice[feature] = method
 
+    trace("methods_agent", "methods_chosen", methods=method_choice)
     new_log_entry = {"agent": "methods_agent", "action": f"agent decided what method is best to use for calculating the statistics, and the decision it made: {response_text}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
@@ -300,6 +316,7 @@ def modelling_agent(state: ResearchState) -> dict:
 
             results[feature] = calculated #return in the dict 
 
+    trace("modelling_agent", "test_result", attempt=state["modelling_counter"] + 1, feature=feature, method=method, result=calculated)
     new_log_entry = {"agent": "modelling_agent", "action": f"Ran one statistical test per feature. Results: {results}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
@@ -336,6 +353,7 @@ def interpretation_agent(state: ResearchState) -> dict:
 
     if state["reviewer_feedback"] and not state["reviewer_verdict"]:#if feedback was not empty and verdit is false 
         error_note = f"\nYour previous interpretation was not approved by the reviewer, and the reason was: {state['reviewer_feedback']}\nInterpret the info again."
+        trace("interpretation_agent", "revision", attempt=state["revision_counter"] + 1, feedback=state["reviewer_feedback"])
     else:
         error_note = ""
 
@@ -381,11 +399,11 @@ state that it cannot be determined instead of guessing.
     )
     
     response_text = response.choices[0].message.content
-    print(f"[interpretation_agent] interpretation = {response_text}", flush=True)
-    print(f"[interpretation_agent] finish_reason = {response.choices[0].finish_reason}, content_is_none = {response_text is None}", flush=True)
-    print(
-        f"[interpretation_agent] usage = {response.usage}",
-        flush=True
+    trace(
+        "interpretation_agent", "interpretation",
+        attempt=state["revision_counter"] + 1,
+        text=response_text,
+        finish_reason=response.choices[0].finish_reason,
     )
 
     new_log_entry = {"agent": "interpretation_agent", "action": f"interpreting the data that was given from data_agent, response was: {response_text}"}
@@ -447,8 +465,8 @@ Example of the exact shape required (do not copy the content it only serves as a
     else:
         failed_log =""
 
-    log_event("reviewer_agent", "review", verdict=reviewer_verdict, reason=json_reformat["reason"], revision=revision_counter)
-    
+    trace("reviewer_agent", "verdict", attempt=revision_counter + 1, approved=reviewer_verdict, reason=json_reformat["reason"])
+
     new_log_entry = {"agent": "reviewer_agent", "action": f"Deciding if the interpretation was valid or not, this time the verdict was {reviewer_verdict} and reasoning was: {json_reformat['reason']}. {failed_log}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
@@ -499,7 +517,7 @@ The model selected as best, with its reasoning:
     
     if state["report_feedback"] and not state["report_verdict"]:
         error_note = f"\nYour previous report was not approved by the reviewer, and the reason was: {state['report_feedback']}\nWrite the report again, making sure to fix this specific issue."
-        log_event("report_agent", "revision", counter=state["report_revision_counter"] + 1, feedback=state["report_feedback"])
+        trace("report_agent", "revision", attempt=state["report_revision_counter"] + 1, feedback=state["report_feedback"])
     else:
         error_note = ""
 
@@ -574,6 +592,7 @@ academic tone.
     if not response_text or not response_text.strip():
         raise ValueError("Report agent returned an empty scientific report")
 
+    trace("report_agent", "report_written", attempt=state["report_revision_counter"] + 1, report=response_text)
     new_log_entry = {"agent": "report_agent", "action": "Generated the full report, combining statistical testing and predictive modeling results."}
     updated_log = state["decision_log"] + [new_log_entry]
 
@@ -642,9 +661,11 @@ Example of the exact shape required (do not copy the content, only the structure
         max_tokens=5500,
     )
 
-    print(f"[report_reviewer_agent] prompt length (chars) = {len(prompt)}")
-    print(f"[report_reviewer_agent] finish_reason = {response.choices[0].finish_reason}")
-    print(f"[report_reviewer_agent] raw content = {repr(response.choices[0].message.content)}")
+    trace(
+        "report_reviewer_agent", "llm_response",
+        prompt_chars=len(prompt),
+        finish_reason=response.choices[0].finish_reason,
+    )
 
     response_text = response.choices[0].message.content
 
@@ -667,6 +688,7 @@ Example of the exact shape required (do not copy the content, only the structure
     else:
         failed_log = ""
 
+    trace("report_reviewer_agent", "verdict", attempt=revision_counter, approved=report_verdict, reason=json_reformat["reason"])
     new_log_entry = {"agent": "report_reviewer_agent", "action": f"Deciding if the report was accurate or not, this time the verdict was {report_verdict} and reasoning was: {json_reformat['reason']}. {failed_log}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
@@ -735,6 +757,8 @@ graph = builder.compile()
 
 
 def run_workflow():
+    trace("workflow", "run_started")
+
     # Generate graph visualization when the workflow is triggered
     graph.get_graph().draw_mermaid_png(
         output_file_path="/app/output/graph.png"
@@ -756,8 +780,27 @@ def run_workflow():
         "report_revision_counter": 0,
     })
 
-    print("Decision log: ", result["decision_log"])
-    print("----------------------------------------------- THIS IS THE REPORT -----------------------------------------------")
-    print("Scientific report: ", result["scientific_report"])
+    if any("error" in r for r in result["calculated_data"].values()):
+        final_status = "modelling_failed"
+    elif not result["reviewer_verdict"]:
+        final_status = "interpretation_rejected"
+    elif not result["report_verdict"]:
+        final_status = "report_rejected"
+    else:
+        final_status = "completed"
 
+    trace(
+        "workflow", "run_finished",
+        status=final_status,
+        interpretation_attempts=result["revision_counter"],
+        report_attempts=result["report_revision_counter"],
+    )
+
+    #save the report as a markdown file in the output folder (mounted to ./output on the host)
+    if result["scientific_report"]:
+        report_path = f"/app/output/report_{int(time.time())}.md"
+        with open(report_path, "w") as f:
+            f.write(result["scientific_report"])
+        trace("workflow", "report_saved", path=report_path)
+        
     return result
