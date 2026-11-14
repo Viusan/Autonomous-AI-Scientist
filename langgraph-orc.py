@@ -757,6 +757,7 @@ graph = builder.compile()
 
 
 def run_workflow():
+     init_log()  #new log file for every run, otherwise all runs end up in the same file
     trace("workflow", "run_started")
 
     # Generate graph visualization when the workflow is triggered
