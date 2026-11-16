@@ -232,7 +232,8 @@ def modelling_agent(state: ResearchState) -> dict:
     results = {}
 
     if not method_choice:
-            results["_pipeline_error"] = {"error": "methods_agent produced no usable METHOD lines; method_choice was empty."}
+        results["_pipeline_error"] = {"error": "methods_agent produced no usable METHOD lines; method_choice was empty."}
+        trace("modelling_agent", "pipeline_error", attempt=state["modelling_counter"] + 1, error=results["_pipeline_error"]["error"])
     else:
         for feature, method in method_choice.items():#we put this in a loop cause we running statistics for each method the LLM chose
             prompt = f"""
@@ -316,7 +317,8 @@ def modelling_agent(state: ResearchState) -> dict:
 
             results[feature] = calculated #return in the dict 
 
-    trace("modelling_agent", "test_result", attempt=state["modelling_counter"] + 1, feature=feature, method=method, result=calculated)
+            trace("modelling_agent", "test_result", attempt=state["modelling_counter"] + 1, feature=feature, method=method, result=calculated)
+    
     new_log_entry = {"agent": "modelling_agent", "action": f"Ran one statistical test per feature. Results: {results}"}
     updated_log = state["decision_log"] + [new_log_entry]
 
@@ -756,8 +758,8 @@ builder.add_conditional_edges(
 graph = builder.compile()
 
 
-def run_workflow():
-     init_log()  #new log file for every run, otherwise all runs end up in the same file
+def run_workflow(run_id):
+    init_log(run_id)  #new log file for every run, same id as the report
     trace("workflow", "run_started")
 
     # Generate graph visualization when the workflow is triggered
@@ -799,7 +801,7 @@ def run_workflow():
 
     #save the report as a markdown file in the output folder (mounted to ./output on the host)
     if result["scientific_report"]:
-        report_path = f"/app/output/report_{int(time.time())}.md"
+        report_path = f"/app/output/report_{run_id}.md"
         with open(report_path, "w") as f:
             f.write(result["scientific_report"])
         trace("workflow", "report_saved", path=report_path)
