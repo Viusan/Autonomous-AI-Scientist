@@ -13,9 +13,11 @@ services:
       TABLE_NAME: diabetes_binary 
 
     volumes:
+      - ./:/app:ro
       - ./diabetes.db:/app/diabetes.db:ro
       - ./output:/app/output
       - ./logs:/app/logs
+      - /dev/null:/app/.env:ro
 
     depends_on:
       proxy:
