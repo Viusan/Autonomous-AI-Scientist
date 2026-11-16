@@ -1,4 +1,5 @@
 import importlib.util
+import time
 
 from fastapi import FastAPI, HTTPException
 
@@ -19,8 +20,9 @@ def health_check():
 
 @app.post("/run")
 def run_analysis():
+    run_id = str(int(time.time()))
     try:
-        result = langgraph_orc.run_workflow()
+        result = langgraph_orc.run_workflow(run_id)
     except Exception as e:
         #only real crashes give 500 now
         raise HTTPException(status_code=500, detail=str(e))
