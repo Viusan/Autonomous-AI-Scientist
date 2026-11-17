@@ -17,6 +17,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
 from langchain_core.messages import ToolMessage
 from log_system import init_log, log_event
+from oversight import add_oversight
 
 load_dotenv()
 
@@ -277,6 +278,10 @@ def modelling_agent(state: ResearchState) -> dict:
       Always print a GROUP_SUMMARY line, no matter which test was used above — never skip it.
     - The code must run standalone from top to bottom with no undefined variables, other than
       `given_data` itself.
+    - Finally print one line listing every argument you passed to the test function
+      (including ones you left at their default if they change the result, e.g. correction
+      for a chi-square test), in exactly this format:
+      SETTINGS: <argument>=<value>, <argument>=<value>
     """
 
             response = client.chat.completions.create(
@@ -292,12 +297,15 @@ def modelling_agent(state: ResearchState) -> dict:
                 text = sandbox_result["stdout"]
                 result_line = None
                 summary_line = None
+                settings_line = None
             
                 for line in text.split("\n"):
                     if line.startswith("RESULT:"):
                         result_line = line
                     if line.startswith("GROUP_SUMMARY:"):
                         summary_line = line
+                    if line.startswith("SETTINGS:"):
+                        settings_line = line
             
                 if result_line:
                     try:
@@ -308,6 +316,8 @@ def modelling_agent(state: ResearchState) -> dict:
                         calculated = {"statistic": float(statistic_value[1]), "p_value": float(p_value[1])}
                         if summary_line:
                             calculated["group_summary"] = summary_line.split("GROUP_SUMMARY:", 1)[1].strip()
+                        if settings_line:
+                            calculated["settings"] = settings_line.split("SETTINGS:", 1)[1].strip()
                     except Exception as e:
                         calculated = {"error": f"Could not parse output '{text}': {e}"}
                 else:
@@ -315,7 +325,12 @@ def modelling_agent(state: ResearchState) -> dict:
             else:
                 calculated = {"error": sandbox_result["error"]}
 
-            results[feature] = calculated #return in the dict 
+            #labelled group numbers and an independent check, see oversight.py.
+            #outside the try, so a crash here is never blamed on the agent's code
+            if "error" not in calculated:
+                calculated = add_oversight(calculated, given_data, feature, method)
+
+            results[feature] = calculated #return in the dict
 
             trace("modelling_agent", "test_result", attempt=state["modelling_counter"] + 1, feature=feature, method=method, result=calculated)
     
@@ -346,9 +361,8 @@ def interpretation_agent(state: ResearchState) -> dict:
         if "error" in result:
             line = f"- {feature}: test failed with error: {result['error']}"
         else:
-            line = f"- {feature}: statistic={result['statistic']}, p_value={result['p_value']}"
-            if "group_summary" in result:
-                line = line + f", group summary: {result['group_summary']}"
+            #pass everything, including the code-computed "groups" with labelled direction
+            line = f"- {feature}: {json.dumps(result)}"
         result_list.append(line)
     
     results_description = "\n".join(result_list)#we turn the result list from a list to a string
