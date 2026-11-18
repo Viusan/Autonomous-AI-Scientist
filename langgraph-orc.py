@@ -107,6 +107,91 @@ def call_reviewer(agent_name, prompt, max_tokens):
     #still nothing after two tries: return what we have, the caller treats it as not approved
     return response_text
 
+def normalize_for_matching(text):
+    #LLMs often change special characters when they copy text (narrow spaces, unicode hyphens,
+    #curly quotes), so compare a simplified version of both texts instead of the raw strings
+    text = str(text).lower()
+    for special in [" ", " ", " "]:
+        text = text.replace(special, " ")
+    for dash in ["‐", "‑", "‒", "–", "—", "−"]:
+        text = text.replace(dash, "-")
+    for quote_char in ["“", "”", "‘", "’", "\"", "'", "*", "`"]:
+        text = text.replace(quote_char, "")
+    return " ".join(text.split())
+
+def quote_is_in_text(quote, text):
+    #true if every part of the quote appears in the text. a reviewer may shorten a long
+    #sentence with "..." so each part between the dots is checked on its own
+    parts = quote.replace("…", "...").split("...")
+    normalized_text = normalize_for_matching(text)
+    found_any = False
+    for part in parts:
+        part = normalize_for_matching(part).strip(" .,;:")
+        if not part:
+            continue
+        if part not in normalized_text:
+            return False
+        found_any = True
+    return found_any
+
+def get_review(agent_name, prompt, max_tokens, reviewed_text=None):
+    #ask a reviewer and turn its answer into {"verdict": bool, "reason": str, "quote": str}.
+    #two things are checked by code, and in both cases we ask the reviewer once more,
+    #because like an empty answer it is the reviewer's own problem, not the work's:
+    #  1) a verdict without a reason: the reviewer never said what it checked
+    #  2) a rejection that quotes text which is not in the reviewed text: the reviewer
+    #     invented the quote, so the rejection is based on something that was never written
+    problems = []   #what went wrong in each attempt, so the final message says what really happened
+    review = None
+
+    for attempt in range(2):
+        response_text = call_reviewer(agent_name, prompt, max_tokens)
+
+        if not response_text:
+            #call_reviewer already retried, so don't ask a third time
+            return {"verdict": False, "reason": f"{agent_name} returned no content to parse.", "quote": ""}
+
+        try:
+            review = json.loads(response_text)
+        except Exception as e:
+            return {"verdict": False, "reason": f"Could not parse {agent_name} response as JSON: {e}", "quote": ""}
+
+        verdict = bool(review.get("verdict", False))
+        reason = str(review.get("reason", "")).strip()
+        quote = str(review.get("quote", "") or "").strip()
+        review = {"verdict": verdict, "reason": reason, "quote": quote}
+
+        if not reason:
+            problems.append(f"attempt {attempt + 1}: gave a verdict ({verdict}) without a reason")
+            trace(agent_name, "empty_reason", attempt=attempt + 1, verdict=verdict)
+            continue
+
+        #only rejections need a quote. an empty quote is allowed, it means something is missing
+        if not verdict and quote and reviewed_text is not None:
+            if not quote_is_in_text(quote, reviewed_text):
+                problems.append(f"attempt {attempt + 1}: rejected with a quote that is not in the text (\"{quote}\")")
+                trace(agent_name, "quote_not_found", attempt=attempt + 1, quote=quote, reason=reason)
+                continue
+            trace(agent_name, "quote_verified", attempt=attempt + 1, quote=quote)
+        elif not verdict and not quote:
+            trace(agent_name, "no_quote", attempt=attempt + 1, reason=reason)
+
+        return review
+
+    #both attempts were unusable. we still reject (we can't approve work that was never really
+    #checked), but the message says exactly what went wrong in each attempt
+    summary = "; ".join(problems)
+    trace(agent_name, "review_unusable", problems=problems)
+
+    if review is not None and review["reason"] and review["quote"]:
+        #the last answer had a real reason but a quote that doesn't exist: pass the criticism on,
+        #with a warning so the writer checks it against its own text instead of rewriting blindly
+        reason = (f"{review['reason']} (Note: the quoted text \"{review['quote']}\" was not found in what you wrote, "
+                  f"so this criticism may not apply. Check it against your own text.)")
+        return {"verdict": False, "reason": reason, "quote": review["quote"]}
+
+    return {"verdict": False, "reason": f"{agent_name} did not give a usable verdict, so the work is not approved ({summary}).", "quote": ""}
+
 def shorten(text, max_chars=1000):
     #long error messages (for example when the agent's code printed a whole table)
     #must never go into a prompt in full, or the prompt becomes too big for the model
@@ -488,6 +573,15 @@ reported group values and express it in percentage points when appropriate.
 Do not invent or estimate numerical ranges that are not supported by the data.
 If the direction or magnitude cannot be determined from the provided results,
 state that it cannot be determined instead of guessing.
+
+Variable meanings (codebook):
+{make_codebook_text()}
+
+Before interpreting, check that the data itself is plausible. Look at the group numbers for
+each feature (mean, median, n_missing_dropped, diabetes_prevalence_pct) and compare them with
+the codebook and with what is realistic for what the variable measures, including how much data
+is missing. If any value looks impossible or suspicious,
+say so clearly and do not present results that depend on it as a normal finding.
 {error_note}
 """
 
@@ -523,29 +617,28 @@ Method used: {state['method_choice']}
 Here is the interpretation text that was written based on that result:
 {interpreted_text}
 
-Assume the data and method themselves are already correct, that is not what you are checking. Your only job is to decide whether the interpretation text above accurately and faithfully reflects the given data and method. Reject it (REVISE) if the text:
+Variable meanings (codebook):
+{make_codebook_text()}
+
+Assume the statistical method and the computed numbers are correct, that is not what you are checking. But the data itself can be wrong. Your job is to decide whether the interpretation text above accurately and faithfully reflects the given data and method, and whether it notices data that is not plausible. Reject it (REVISE) if the text:
 - misrepresents or contradicts the actual numbers or method
 - ignores the data entirely and doesn't meaningfully engage with it
 - draws a conclusion the data doesn't support
 - is vague, off-topic, or unrelated to the actual statistical result
+- presents a result as a normal finding even though the group numbers (mean, median, n_missing_dropped, prevalence) are impossible or suspicious for that variable according to the codebook and what is realistic for what the variable measures, without mentioning the problem
 
-Respond with ONLY a single JSON object and nothing else, no markdown code fences, no text before or after it. The object must have exactly these two keys:
+Respond with ONLY a single JSON object and nothing else, no markdown code fences, no text before or after it. The object must have exactly these three keys:
 - "verdict": a boolean. true if the interpretation accurately reflects the data, false if it does not.
 - "reason": a string explaining why you reached that verdict, referencing the specific data/method. This part is needed every single time, do not put a empty reason, but explain why you decided what do you did.
+- "quote": if verdict is false, the exact sentence or phrase from the interpretation text that is wrong, copied word for word. If the problem is that something is missing from the text, use an empty string "". If verdict is true, use an empty string "".
 
 Example of the exact shape required (do not copy the content it only serves as an example, copy only the structure):
-{{"verdict": false, "reason": "The interpretation claims a significant effect, but the p-value of 0.42 does not support that."}}
+{{"verdict": false, "reason": "The interpretation claims a significant effect, but the p-value of 0.42 does not support that.", "quote": "there is a significant effect of X on diabetes"}}
 """
 
-    response_text = call_reviewer("reviewer_agent", prompt, 8000)
-
-    if response_text:
-        try:
-            json_reformat = json.loads(response_text)
-        except Exception as e:
-            json_reformat = {"verdict": False, "reason": f"Could not parse reviewer response as JSON: {e}"}
-    else:
-        json_reformat = {"verdict": False, "reason": "Reviewer agent returned no content to parse."}
+    json_reformat = get_review("reviewer_agent", prompt, 8000, reviewed_text=interpreted_text)
+    #the feedback the interpretation agent gets on a revision, always with a reason
+    response_text = json.dumps(json_reformat)
 
     if json_reformat["verdict"]:
         reviewer_verdict = True
@@ -727,6 +820,13 @@ supports it (Cramér's V or rank-biserial r of about 0.3 or more).
 Do not write any tables anywhere in the report, including Methods. The settings for each
 feature are already shown in the statistics table.
 Do not mention the placeholders or that tables will be inserted.
+
+Data quality: before writing, check the group numbers in the raw results (mean, median,
+n_missing_dropped, prevalence) against the codebook and against what is realistic for each
+variable. End the Methods section with a short paragraph on data quality. If any value looks
+impossible or suspicious, name the feature and the problem there,
+and say in the Discussion and Limitations how it may affect the results. Never present a result
+that depends on implausible values as a normal finding. If nothing looks implausible, say so.
 {error_note}
 """
     response = client.chat.completions.create(
@@ -744,6 +844,11 @@ Do not mention the placeholders or that tables will be inserted.
     #the LLM only wrote placeholders, now code builds the real tables and puts them in
     statistics_table = stats_table(state["calculated_data"])
     models_table = model_table(ml_data, state["calculated_data"])
+    #the LLM sometimes puts a placeholder in the middle of a sentence ("is presented in {{STATS_TABLE}}."),
+    #and then the table breaks the text. a markdown table only works on its own lines,
+    #so always put blank lines around the placeholders before the tables go in
+    response_text = response_text.replace(stats_placeholder, f"\n\n{stats_placeholder}\n\n")
+    response_text = response_text.replace(model_placeholder, f"\n\n{model_placeholder}\n\n")
     response_text = render_report(response_text, statistics_table, models_table)
 
     trace("report_agent", "report_written", attempt=state["report_revision_counter"] + 1, report=response_text)
@@ -817,29 +922,36 @@ Check specifically for:
   settings above say otherwise.
 - A count of variables that does not match the features listed, or a reference to a
   supplementary table, appendix or literature that does not exist.
+- Implausible data that the report does not mention: compare the group numbers in the raw results
+  (mean, median, n_missing_dropped, prevalence) with the variable meanings below and with what is
+  realistic for what the variable measures, including how much data is missing.
+  If such a problem exists and the report presents the affected result as a normal finding, reject it.
+
+Variable meanings (codebook):
+{make_codebook_text()}
 
 Respond with ONLY a single JSON object and nothing else, no markdown code fences, no text
-before or after it. The object must have exactly these two keys:
+before or after it. The object must have exactly these three keys:
 - "verdict": a boolean. true if the report is accurate and internally consistent, false if not.
 - "reason": a string explaining why, citing the specific mismatch if verdict is false.
+- "quote": if verdict is false, the exact sentence or phrase from the report that is wrong, copied
+  word for word. If the problem is that something is missing from the report, use an empty string "".
+  If verdict is true, use an empty string "".
 
 Example of the exact shape required (do not copy the content, only the structure):
-{{"verdict": false, "reason": "The report describes BMI as tested with a chi-square test, but method_choice lists BMI as Mann-Whitney U test."}}
+{{"verdict": false, "reason": "The report describes BMI as tested with a chi-square test, but method_choice lists BMI as Mann-Whitney U test.", "quote": "BMI was compared with a chi-square test"}}
 """
-    response_text = call_reviewer("report_reviewer_agent", prompt, 8000)
+    #16000, not 8000: the report prompt is large and this reviewer used 7000-8000 tokens and ran out
+    json_reformat = get_review("report_reviewer_agent", prompt, 16000, reviewed_text=report_text)
 
-    if response_text:
-        try:
-            json_reformat = json.loads(response_text)
-        except Exception as e:
-            json_reformat = {"verdict": False, "reason": f"Could not parse report reviewer response as JSON: {e}"}
-    else:
-        json_reformat = {"verdict": False, "reason": "Report reviewer agent returned no content to parse."}
-
-    report_verdict = bool(json_reformat["verdict"])
+    report_verdict = json_reformat["verdict"]
     if not report_text or not report_text.strip():
         report_verdict = False
+        json_reformat["verdict"] = False
         json_reformat["reason"] = "Scientific report is empty and cannot be approved."
+
+    #the feedback the report agent gets on a revision, always with a reason
+    response_text = json.dumps(json_reformat)
 
     revision_counter = state["report_revision_counter"]
     if not report_verdict and revision_counter + 1 == 3:
