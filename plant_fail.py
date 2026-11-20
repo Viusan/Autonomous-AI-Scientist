@@ -25,7 +25,7 @@ def plant_label_stoy(df, andel=0.1): # ca 10 prosent av dataene skal odelegges, 
     return df_kopi, fasit
 
 
-def plant_urealistisk_bmi(df, andel=0.05, kolonne="BMI"): # ca 5 prosent av radene får BMI satt til 0 eller 999.
+def plant_urealistisk_bmi(df, andel=0.2, kolonne="BMI"): # ca 20 prosent av radene får BMI satt til 0 eller 999.
     df_kopi = df.copy()
 
     # Velger randomme rader å ødelegge
