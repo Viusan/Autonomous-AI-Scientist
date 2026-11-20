@@ -22,25 +22,32 @@ from report_tables import settings_summary, stats_table, model_table, model_fact
 
 load_dotenv()
 
-api_key = os.getenv("OSBOT_API_KEY")
-base_url = os.getenv("OSBOT_BASE_URL")
-model_name = os.getenv("LOCAL_MODEL")
+if os.getenv("LLM_PROVIDER") == "claude":
+    llm_key = os.getenv("ANTHROPIC_API_KEY")
+    base_url = "https://api.anthropic.com/v1/"
+    model_name = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5")
+    extra_headers = {}
+else:
+    llm_key = "dummy"
+    base_url = os.getenv("OSBOT_BASE_URL")
+    model_name = os.getenv("LOCAL_MODEL")
+    extra_headers = {"x-api-key": os.getenv("OSBOT_API_KEY")}
 
 def make_model():
     #we create a new model every run, because the async client gets tied to the event loop
     #asyncio.run() closes the loop after each run, so a reused model would crash on the next /run
     return ChatOpenAI(
         model=model_name,
-        api_key="dummy",
+        api_key=llm_key,
         base_url=base_url,
         max_tokens=5000,
-        default_headers={"x-api-key": api_key},
+        default_headers=extra_headers,
     )
 
 client = OpenAI(
-    api_key="dummy",
+    api_key=llm_key,
     base_url=base_url,
-    default_headers={"x-api-key": api_key},
+    default_headers=extra_headers,
 )
 
 def trace(agent, event, **details):
@@ -832,7 +839,7 @@ that depends on implausible values as a normal finding. If nothing looks implaus
     response = client.chat.completions.create(
         model=model_name,
         messages=[{"role": "user", "content": prompt}],
-        max_tokens=5000,
+        max_tokens=20000,
     )
     log_usage("report_agent", response)
 
